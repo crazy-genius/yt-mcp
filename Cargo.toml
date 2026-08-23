@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/*"
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+authors = ["Minkin Aleksei <thespiritofnetwork@gmail.com>"]
+
+[profile.release]
+# Tell `rustc` to optimize for small code size.
+opt-level = "s"
+
+[workspace.dependencies]
+# slef crate
+youtrack-mcp-core = { path = "crates/youtrack-mcp-core" }
+youtrack-client-wrapper = { path = "crates/youtrack-client-wrapper" }
+
+# youtrack client
+yt-rs = { git = "https://github.com/crazy-genius/yt-rs.git", rev = "eab3cfec655bb6f24b0bcd211b6e2206a90a2383", version = "0.0.4" }
+
+# async runtime
+tokio = { version = "1.53", default-features = false }
+
+# http server
+axum = { version = "0.8", default-features = false }
+
+# mcp sdk
+rmcp = { version = "3.1.4", default-features = false }
+schemars = { version = "1.2", default-features = false }
+
+# serde
+serde = { version = "1.0", default-features = false }
+serde_json = { version = "1.0", default-features = false }
+
+# error handling
+thiserror = { version = "2.0", default-features = false }
+anyhow = "1"
+
+# http client
+reqwest = { version = "0.13", default-features = false }
+url = { version = "2.5", default-features = false }
+
+# streams
+futures-util = { version = "0.3", default-features = false }
+
+# testing
+wiremock = "0.6"

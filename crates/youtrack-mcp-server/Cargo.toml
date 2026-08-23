@@ -1,0 +1,23 @@
+[package]
+name = "youtrack-mcp-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# mcp server
+rmcp = { workspace = true, default-features = true, features = ["server", "transport-io"]}
+
+# youtrack
+youtrack-mcp-core = { workspace = true }
+
+# async runtime
+tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi-thread"] }
+
+# serde
+serde = { workspace = true, default-features = true }
+serde_json = { workspace = true, default-features = true }
+schemars = { workspace = true, default-features = true }
+
+# error
+thiserror = { workspace = true }
