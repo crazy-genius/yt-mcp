@@ -1,0 +1,40 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - httproute.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/name: yt-mcp
+      app.kubernetes.io/component: mcp-server
+
+configMapGenerator:
+  - name: yt-mcp
+    literals:
+      # В контейнере loopback недостижим снаружи.
+      - MCP_BIND=0.0.0.0:8080
+      - YOUTRACK_URL=https://youtrack.example.com
+      # Значение здесь — заглушка: replacements ниже перезапишет его
+      # именем хоста из HTTPRoute.
+      - MCP_ALLOWED_HOSTS=PLACEHOLDER
+
+# Транспорт rmcp сверяет заголовок Host со своим списком и отвечает
+# 403 Forbidden на всё, чего в списке нет. Gateway пробрасывает исходный
+# Host, поэтому список обязан совпадать с hostnames маршрута. Держать два
+# одинаковых значения в двух файлах — значит однажды поменять одно из них,
+# поэтому имя хоста живёт только в HTTPRoute, а сюда копируется.
+replacements:
+  - source:
+      kind: HTTPRoute
+      name: yt-mcp
+      fieldPath: spec.hostnames.0
+    targets:
+      - select:
+          kind: ConfigMap
+          name: yt-mcp
+        fieldPaths:
+          - data.MCP_ALLOWED_HOSTS

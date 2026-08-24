@@ -1,0 +1,22 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: yt-mcp
+spec:
+  parentRefs:
+    - name: shared-gateway
+      sectionName: https
+  # Единственное место, где имя хоста задаётся руками. Отсюда kustomize
+  # копирует его в MCP_ALLOWED_HOSTS (см. replacements в kustomization.yaml),
+  # потому что расхождение между этими двумя значениями даёт 403 на каждый
+  # запрос без единой подсказки в логе.
+  hostnames:
+    - mcp.example.com
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /mcp
+      backendRefs:
+        - name: yt-mcp
+          port: 8080

@@ -1,0 +1,42 @@
+[package]
+name = "yt-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+examples = [
+    "tokio",
+    "tokio/rt",
+    "tokio/rt-multi-thread",
+    "tokio/macros"
+]
+
+[[example]]
+name = "readme"
+path = "examples/readme.rs"
+required-features = ["examples"]
+
+[dependencies]
+# youtrack client
+yt-rs = { workspace = true, default-features = true }
+
+# serde
+serde = { workspace = true, features = ["derive"]}
+serde_json = { workspace = true, features = ["std"] }
+
+# http client
+reqwest = { workspace = true, features = ["rustls", "json", "query"] }
+url = { workspace = true, features = ["serde"] }
+
+# error handling
+thiserror = { workspace = true, features = ["default"] }
+
+# tokio runtime for examples
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+wiremock = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+serde_json = { workspace = true, features = ["std"] }

@@ -1,0 +1,26 @@
+[package]
+name = "yt-mcp-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# youtrack api
+yt-client = { workspace = true }
+
+# mcp sdk
+rmcp = { workspace = true, features = ["macros", "server"] }
+
+# http parts из транспорта
+http = { workspace = true }
+
+# serde
+serde = { workspace = true, default-features = true }
+serde_json = { workspace = true, default-features = true }
+schemars = { workspace = true, default-features = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "io-util"] }
+# интеграционный тест поднимает настоящего MCP-клиента напротив сервера,
+# поэтому клиентская часть rmcp нужна именно здесь и только в тестах
+rmcp = { workspace = true, features = ["client", "transport-async-rw"] }

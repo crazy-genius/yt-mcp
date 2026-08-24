@@ -1,0 +1,37 @@
+[package]
+name = "yt-mcp-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+# mcp server
+rmcp = { workspace = true, default-features = true, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+
+# youtrack
+yt-mcp-core = { workspace = true }
+yt-client = { workspace = true }
+
+# http server
+axum = { workspace = true, default-features = true }
+
+# async runtime
+tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi-thread", "net", "macros"] }
+
+# error handling
+anyhow = { workspace = true }
+
+# constant-time secret comparison
+subtle = { workspace = true }
+
+# logs
+tracing = { workspace = true, default-features = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+wiremock = { workspace = true }
+serde_json = { workspace = true, default-features = true }

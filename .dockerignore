@@ -1,0 +1,15 @@
+/target
+
+/.git
+/.idea
+/deployment
+/docs
+
+# Секреты рядом не пробегали.
+/.env
+
+# В образ не нужны: сборкой не используются.
+/README.md
+/Makefile
+/rustfmt.toml
+/LICENSE_APACHE

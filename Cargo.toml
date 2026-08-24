@@ -15,8 +15,8 @@ opt-level = "s"
 
 [workspace.dependencies]
 # slef crate
-youtrack-mcp-core = { path = "crates/youtrack-mcp-core" }
-youtrack-client-wrapper = { path = "crates/youtrack-client-wrapper" }
+yt-mcp-core = { path = "crates/yt-mcp-core" }
+yt-client = { path = "crates/yt-client" }
 
 # youtrack client
 yt-rs = { git = "https://github.com/crazy-genius/yt-rs.git", rev = "eab3cfec655bb6f24b0bcd211b6e2206a90a2383", version = "0.0.4" }
@@ -39,12 +39,19 @@ serde_json = { version = "1.0", default-features = false }
 thiserror = { version = "2.0", default-features = false }
 anyhow = "1"
 
+# http parts из транспорта
+http = "1"
+
 # http client
 reqwest = { version = "0.13", default-features = false }
 url = { version = "2.5", default-features = false }
 
-# streams
-futures-util = { version = "0.3", default-features = false }
+# constant-time secret comparison
+subtle = { version = "2.6", default-features = false }
+
+# logs (rmcp пишет в tracing; без подписчика его диагностика теряется)
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false }
 
 # testing
 wiremock = "0.6"

@@ -1,0 +1,60 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: yt-mcp
+
+resources:
+  - ../../base
+
+images:
+  - name: yt-mcp
+    newName: registry.example.com/yt-mcp
+    newTag: "0.0.1"
+
+replicas:
+  - name: yt-mcp
+    count: 2
+
+# Имя хоста правится ТОЛЬКО здесь. MCP_ALLOWED_HOSTS подтянется само через
+# replacements из base — руками его задавать не надо и не следует.
+patches:
+  - target:
+      kind: HTTPRoute
+      name: yt-mcp
+    patch: |
+      - op: replace
+        path: /spec/hostnames/0
+        value: mcp.internal.example.com
+  - target:
+      kind: HTTPRoute
+      name: yt-mcp
+    patch: |
+      - op: replace
+        path: /spec/parentRefs/0/name
+        value: internal-gateway
+
+configMapGenerator:
+  - name: yt-mcp
+    behavior: merge
+    literals:
+      - YOUTRACK_URL=https://youtrack.internal.example.com
+
+# Тот же replacements, что и в base, повторён здесь намеренно. kustomize
+# выполняет трансформеры базы ДО патчей оверлея, поэтому base скопировал бы
+# ещё непропатченное имя хоста. Повтор на внешнем уровне пересчитывает
+# MCP_ALLOWED_HOSTS уже по итоговому hostnames.
+#
+# Проверяется одной командой:
+#   kubectl kustomize overlays/example | grep -E 'MCP_ALLOWED_HOSTS|- mcp\.'
+# оба значения обязаны совпасть.
+replacements:
+  - source:
+      kind: HTTPRoute
+      name: yt-mcp
+      fieldPath: spec.hostnames.0
+    targets:
+      - select:
+          kind: ConfigMap
+          name: yt-mcp
+        fieldPaths:
+          - data.MCP_ALLOWED_HOSTS

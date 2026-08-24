@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: yt-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: yt-mcp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: yt-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: yt-mcp
+          image: yt-mcp:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: yt-mcp
+          env:
+            # Секрет уровня 1. Не создаётся этим kustomize намеренно —
+            # см. README: секрет в git не место.
+            - name: MCP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: yt-mcp
+                  key: MCP_TOKEN
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Пробы по TCP, а не по HTTP: единственный маршрут `/mcp` закрыт
+          # гейтом уровня 1 и отвечает 401, который kubelet считает провалом.
+          # Отдельного /health у сервера нет, и заводить его ради проб
+          # означало бы открыть неаутентифицированный эндпоинт.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
