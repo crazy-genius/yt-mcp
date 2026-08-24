@@ -11,9 +11,13 @@ images:
     newName: registry.example.com/yt-mcp
     newTag: "0.0.1"
 
+# Одна реплика — не осторожность, а требование: сессии MCP живут в памяти
+# процесса (LocalSessionManager), и без липких сессий на Gateway запрос с
+# Mcp-Session-Id попадёт в чужой под и получит 404. Поднимать это число
+# можно только вместе с session affinity.
 replicas:
   - name: yt-mcp
-    count: 2
+    count: 1
 
 # Имя хоста правится ТОЛЬКО здесь. MCP_ALLOWED_HOSTS подтянется само через
 # replacements из base — руками его задавать не надо и не следует.
