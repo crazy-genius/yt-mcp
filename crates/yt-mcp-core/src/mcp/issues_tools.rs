@@ -1,10 +1,8 @@
 use crate::mcp::{
-    AddCommentArgs, CreateIssueArgs, FindIssueArgs, MyIssuesArgs, SearchIssuesArgs, UserToken,
-    YoutrackMCPServer,
+    CreateIssueArgs, FindIssueArgs, MyIssuesArgs, SearchIssuesArgs, UserToken, YoutrackMCPServer,
 };
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::ContentBlock;
 use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = "youtrack_issues", vis = "pub")]
@@ -45,7 +43,7 @@ impl YoutrackMCPServer {
 
     #[tool(
         name = "youtrack_my_issues",
-        description = "List open (unresolved) issues assigned to a given YouTrack login",
+        description = "List open (unresolved) issues assigned to a given YouTrack login. If the user said 'my issues' without naming a login, get it from youtrack_whoami first.",
         annotations(title = "My open issues", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn my_issues(
@@ -80,33 +78,6 @@ impl YoutrackMCPServer {
         let yt = self.as_user(&token)?;
         match yt.create_issue(&args.project, &args.summary, args.description.as_deref()).await {
             Ok(issue) => Self::json_result(issue),
-            Err(e) => Ok(Self::tool_error(e)),
-        }
-    }
-
-    #[tool(
-        name = "youtrack_add_comment",
-        description = "Adds a comment to the issue",
-        annotations(
-            title = "Comment on issue",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    pub async fn add_comment(
-        &self,
-        params: Parameters<AddCommentArgs>,
-        Extension(token): Extension<UserToken>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = params.0;
-        let yt = self.as_user(&token)?;
-        match yt.add_comment(&args.issue, &args.text).await {
-            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "OK: comment added to {}",
-                args.issue
-            ))])),
             Err(e) => Ok(Self::tool_error(e)),
         }
     }

@@ -1,10 +1,9 @@
 use crate::mcp::{
-    AddArticleCommentArgs, CreateArticleArgs, FindArticleArgs, SearchArticlesArgs,
-    UpdateArticleArgs, UserToken, YoutrackMCPServer,
+    CreateArticleArgs, FindArticleArgs, SearchArticlesArgs, UpdateArticleArgs, UserToken,
+    YoutrackMCPServer,
 };
 use rmcp::handler::server::tool::Extension;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::ContentBlock;
 use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 
 #[tool_router(router = "youtrack_articles", vis = "pub")]
@@ -101,33 +100,6 @@ impl YoutrackMCPServer {
         let yt = self.as_user(&token)?;
         match yt.update_article(&args.id, args.summary.as_deref(), args.content.as_deref()).await {
             Ok(article) => Self::json_result(article),
-            Err(e) => Ok(Self::tool_error(e)),
-        }
-    }
-
-    #[tool(
-        name = "youtrack_add_article_comment",
-        description = "Adds a comment to a Knowledge Base article",
-        annotations(
-            title = "Comment on article",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true
-        )
-    )]
-    pub async fn add_article_comment(
-        &self,
-        params: Parameters<AddArticleCommentArgs>,
-        Extension(token): Extension<UserToken>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = params.0;
-        let yt = self.as_user(&token)?;
-        match yt.add_article_comment(&args.article, &args.text).await {
-            Ok(()) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
-                "OK: comment added to article {}",
-                args.article
-            ))])),
             Err(e) => Ok(Self::tool_error(e)),
         }
     }

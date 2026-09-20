@@ -2194,6 +2194,7 @@ dependencies = [
 name = "yt-client"
 version = "0.0.1"
 dependencies = [
+ "base64 0.22.1",
  "reqwest",
  "serde",
  "serde_json",

@@ -33,6 +33,8 @@ url = { workspace = true, features = ["serde"] }
 # error handling
 thiserror = { workspace = true, features = ["default"] }
 
+base64 = { workspace = true }
+
 # tokio runtime for examples
 tokio = { workspace = true, optional = true }
 

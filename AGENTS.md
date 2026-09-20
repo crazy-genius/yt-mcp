@@ -46,6 +46,33 @@ Environment (`Config::from_env` in `main.rs`):
 Both tokens ride in headers, so **TLS termination at a reverse proxy is mandatory**: never expose
 this server over plain HTTP.
 
+Attachment uploads take bytes through one of two channels, exactly one per call:
+`content_base64` (for content the model produced itself) or `url`, which the **server** downloads
+through a dedicated `reqwest::Client` (`attachment_http` in `Youtrack::new`), separate from the
+pool used for every YouTrack API call. That client is built with `redirect::Policy::none()`,
+`https_only(true)` and a 30-second timeout, and `fetch_bytes` rejects a 3xx response explicitly —
+`error_for_status()` does not treat 3xx as an error, so without that check a refused redirect would
+silently produce an empty "successful" file instead of failing. The refusal matters because
+reqwest's default redirect policy follows up to 10 hops: an `https` URL that answers
+`302 → http://169.254.169.254/...` would sail straight through, and the https-only rule
+(`validate_attachment_url`) would have held for exactly one hop — `https_only(true)` closes that
+same hop at the transport level too, as defense in depth. Both channels share `MAX_ATTACHMENT_BYTES`
+(10 MiB); `Content-Length` is checked before the body is read, and the bytes are still counted while
+reading because that header lies. What is still deliberately **not** checked is where the host
+resolves — no DNS check, no private-range
+refusal, no allowlist — so the server will fetch any https address reachable from its network
+perimeter and the content lands as a YouTrack attachment: a prompt injection carrying an internal
+URL is a real vector. A `ponytail:` note in `yt-client` names the ceiling and the upgrade path:
+resolve the host and refuse loopback/private/link-local/CGNAT, or an env allowlist.
+
+Reading an attachment costs two requests on purpose: metadata first (`mimeType`, `size`), then the
+content only if the mime is text or an image and the reported size fits `MAX_READ_TEXT_BYTES`
+(256 KiB) / `MAX_READ_IMAGE_BYTES` (5 MiB). One request would be shorter, but a 200 MB PDF would
+travel into the server's memory only to be refused afterwards. `size` can come back `null` (YouTrack
+does not always compute it), so that first check alone is not a real limit — `content_block` in
+`yt-mcp-core` re-checks the same limit against `content.bytes.len()`, the size of what the second
+request actually returned, before building the tool result.
+
 ## Architecture
 
 Three crates, strictly layered bottom-up:
@@ -71,10 +98,14 @@ crate (pinned by git rev in the workspace `Cargo.toml`).
 
 **`yt-mcp-core`** — the MCP surface over that service. `YoutrackMCPServer` implements
 `rmcp::ServerHandler`.
-- Tools are split into four `#[tool_router(router = "...", vis = "pub")]` impl blocks
-  (`issues_tools`, `articles_tools`, `commands_tools`, `projects_tools`); `YoutrackMCPServer::new`
-  sums the four routers into one. Adding a tool means adding it to a router block *and* to the name
-  list in the `mcp.rs` test, which asserts the router holds exactly those tools.
+- Tools are split into seven `#[tool_router(router = "...", vis = "pub")]` impl blocks
+  (`issues_tools`, `articles_tools`, `commands_tools`, `projects_tools`, `comments_tools`,
+  `attachments_tools`, `users_tools`); `YoutrackMCPServer::new` sums them into one. The last three
+  are split by *capability*, not by entity: comments and attachments exist on both issues and
+  articles, and putting them next to their entity would have grown `issues_tools` to twelve tools
+  in one file. Adding a tool means adding it to a router block *and* to both tables in the `mcp.rs`
+  tests — the name list, which asserts the router holds exactly those tools, and the call-policy
+  table.
 - `ServerHandler` is implemented by hand, so `#[tool_handler]` generates nothing: `call_tool`,
   `list_tools` and `get_tool` are all written out. Each has a failure mode when it is missing —
   `-32601` on every call, an empty `tools/list` over the wire, and skipped SEP-2243 `Mcp-Param-*`
@@ -88,8 +119,11 @@ crate (pinned by git rev in the workspace `Cargo.toml`).
   comments become the JSON Schema descriptions the LLM reads, so they carry real usage guidance.
 - Call policy lives in MCP annotations (`read_only_hint`, `destructive_hint`, `idempotent_hint`,
   `open_world_hint`, `title`) on the `#[tool(...)]` attribute, not in the description text.
-  `idempotent_hint = false` is set on all six write tools. Exactly two tools are
-  destructive: `youtrack_update_article` (replaces the whole body) and `youtrack_apply_command`.
+  `annotations_match_the_call_policy_table` in `mcp.rs` holds the whole policy as a table of
+  28 rows and is the place to read it. Eight tools are destructive: `youtrack_update_article`,
+  `youtrack_apply_command`, and the six `update_*`/`delete_*` tools for comments and attachments.
+  The `update_*`/`delete_*` six are `idempotent_hint = true` — a repeat with the same arguments
+  leaves the same state — while everything that *adds* an entity is `idempotent_hint = false`.
 - Three MCP resources are served from `references.rs` (large `&str` consts, not files):
   `youtrack://reference/issues/search/query-syntax`, `.../issues/fields`, `.../articles/fields`.
   These teach the model YouTrack's query language and `fields` syntax.
@@ -120,6 +154,16 @@ for YouTrack, which is the whole point of the passthrough.
 
 `crates/yt-client/docs/openapi.json` (500 KB) is the YouTrack OpenAPI spec, kept for
 reference when adding endpoints.
+
+`crates/yt-client/src/lib.rs` carries unit tests for the attachment helpers — the `data:` prefix
+strip, base64 decoding with its limit, the https-only URL check and `fetch_bytes`. The URL check
+and the fetch are separate functions precisely so both are testable: wiremock speaks http, while
+the production rule is https-only, so a single combined function could not be covered at all.
+
+`crates/yt-mcp-core/src/mcp/attachments_tools.rs` unit-tests `plan_read` — which mime becomes
+text, which becomes an image, and which is refused before anything is downloaded — and separately
+`content_block`, which re-checks the same limit against the bytes the content request actually
+returned, independent of what `size` said in the metadata request.
 
 ## Conventions
 

@@ -49,6 +49,9 @@ url = { version = "2.5", default-features = false }
 # constant-time secret comparison
 subtle = { version = "2.6", default-features = false }
 
+# base64: и на декодирование входящего content_base64, и на выдачу картинки
+base64 = { version = "0.22", default-features = false, features = ["std"] }
+
 # logs (rmcp пишет в tracing; без подписчика его диагностика теряется)
 tracing = { version = "0.1", default-features = false }
 tracing-subscriber = { version = "0.3", default-features = false }

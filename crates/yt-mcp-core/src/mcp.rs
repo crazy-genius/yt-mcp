@@ -1,7 +1,10 @@
 mod articles_tools;
+mod attachments_tools;
 mod commands_tools;
+mod comments_tools;
 mod issues_tools;
 mod projects_tools;
+mod users_tools;
 
 use std::sync::Arc;
 
@@ -82,8 +85,20 @@ impl YoutrackMCPServer {
         let project_tools = YoutrackMCPServer::youtrack_projects();
         let articles_tools = YoutrackMCPServer::youtrack_articles();
         let commands_tools = YoutrackMCPServer::youtrack_commands();
+        let comments_tools = YoutrackMCPServer::youtrack_comments();
+        let users_tools = YoutrackMCPServer::youtrack_users();
+        let attachments_tools = YoutrackMCPServer::youtrack_attachments();
 
-        Self { tool_router: issues_tools + project_tools + articles_tools + commands_tools, yt }
+        Self {
+            tool_router: issues_tools
+                + project_tools
+                + articles_tools
+                + commands_tools
+                + comments_tools
+                + users_tools
+                + attachments_tools,
+            yt,
+        }
     }
 
     fn json_result(value: impl serde::Serialize) -> Result<CallToolResult, McpError> {
@@ -133,7 +148,7 @@ impl ServerHandler for YoutrackMCPServer {
     /// его не генерирует, а дефолт трейта отвечает `-32601 tools/call` —
     /// список тулов при этом отдаётся нормально, и наружу это выглядит как
     /// «сервер знает тулы, но не умеет их звать». Проверка стоит здесь, а не
-    /// в двенадцати телах: `initialize`, `tools/list` и `resources/*` обязаны
+    /// в двадцати восьми телах: `initialize`, `tools/list` и `resources/*` обязаны
     /// работать без токена, иначе клиент не сможет сказать пользователю,
     /// чего не хватает.
     async fn call_tool(
@@ -326,6 +341,161 @@ pub struct AddArticleCommentArgs {
     pub text: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListCommentsArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// Page size, default 50, capped at 200
+    #[serde(default)]
+    pub top: Option<i64>,
+    /// How many comments to skip, default 0
+    #[serde(default)]
+    pub skip: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateCommentArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// Internal comment id, e.g. "4-123" — comments have no human-readable id,
+    /// get it from youtrack_list_comments
+    pub comment_id: String,
+    /// New text — REPLACES the whole comment
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteCommentArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// Internal comment id from youtrack_list_comments, e.g. "4-123"
+    pub comment_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListArticleCommentsArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// Page size, default 50, capped at 200
+    #[serde(default)]
+    pub top: Option<i64>,
+    /// How many comments to skip, default 0
+    #[serde(default)]
+    pub skip: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UpdateArticleCommentArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// Internal comment id from youtrack_list_article_comments, e.g. "5-123"
+    pub comment_id: String,
+    /// New text — REPLACES the whole comment
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteArticleCommentArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// Internal comment id from youtrack_list_article_comments, e.g. "5-123"
+    pub comment_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchUsersArgs {
+    /// Space-separated words; ALL of them must occur in the login, full name
+    /// or email (case-insensitive substring match). Empty string lists users.
+    /// NOT the YouTrack query language — the users endpoint has none.
+    pub query: String,
+    /// Page size, default 25
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// How many matches to skip — pass the `next_skip` value from the
+    /// previous response to get the next page.
+    #[serde(default)]
+    pub skip: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListAttachmentsArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadAttachmentArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// File name as it should appear in YouTrack, e.g. "report.csv"
+    pub file_name: String,
+    /// File content, base64. A `data:<mime>;base64,` prefix is accepted.
+    /// Use this for content you produced yourself. Exactly one of
+    /// 'content_base64' and 'url' must be given.
+    #[serde(default)]
+    pub content_base64: Option<String>,
+    /// https URL the server will download the file from — cheaper than
+    /// base64 for anything sizeable, because the bytes never pass through
+    /// the conversation. Exactly one of 'content_base64' and 'url' must be
+    /// given. Plain http is refused.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadAttachmentArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// Attachment id from youtrack_list_attachments, e.g. "8-1"
+    pub attachment_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteAttachmentArgs {
+    /// Human-readable issue id, e.g. "DEMO-123"
+    pub issue: String,
+    /// Attachment id from youtrack_list_attachments, e.g. "8-1"
+    pub attachment_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListArticleAttachmentsArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct UploadArticleAttachmentArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// File name as it should appear in YouTrack, e.g. "scheme.png"
+    pub file_name: String,
+    /// File content, base64. A `data:<mime>;base64,` prefix is accepted.
+    /// Exactly one of 'content_base64' and 'url' must be given.
+    #[serde(default)]
+    pub content_base64: Option<String>,
+    /// https URL the server will download the file from. Exactly one of
+    /// 'content_base64' and 'url' must be given. Plain http is refused.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadArticleAttachmentArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// Attachment id from youtrack_list_article_attachments, e.g. "9-1"
+    pub attachment_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeleteArticleAttachmentArgs {
+    /// Human-readable article id, e.g. "DEMO-A-4"
+    pub article: String,
+    /// Attachment id from youtrack_list_article_attachments, e.g. "9-1"
+    pub attachment_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,13 +514,29 @@ mod tests {
             "youtrack_my_issues",
             "youtrack_apply_command",
             "youtrack_create_issue",
-            "youtrack_add_comment",
             "youtrack_list_projects",
             "youtrack_find_article",
             "youtrack_search_articles",
             "youtrack_create_article",
             "youtrack_update_article",
+            "youtrack_add_comment",
+            "youtrack_list_comments",
+            "youtrack_update_comment",
+            "youtrack_delete_comment",
             "youtrack_add_article_comment",
+            "youtrack_list_article_comments",
+            "youtrack_update_article_comment",
+            "youtrack_delete_article_comment",
+            "youtrack_whoami",
+            "youtrack_search_users",
+            "youtrack_list_attachments",
+            "youtrack_upload_attachment",
+            "youtrack_read_attachment",
+            "youtrack_delete_attachment",
+            "youtrack_list_article_attachments",
+            "youtrack_upload_article_attachment",
+            "youtrack_read_article_attachment",
+            "youtrack_delete_article_attachment",
         ];
         for name in expected {
             assert!(names.contains(&name.to_string()), "missing tool {name}");
@@ -398,39 +584,64 @@ mod tests {
         );
     }
 
-    /// Политика вызова живёт в аннотациях, а не в тексте описания.
-    /// Деструктивных ровно два: перезапись тела статьи и смена состояния
-    /// задачи. Остальные четыре пишущих только добавляют сущности.
+    /// Политика вызова живёт в аннотациях, а не в тексте описания. Таблица
+    /// читается как спецификация этой политики.
+    ///
+    /// Предыдущая версия теста требовала `idempotent_hint == Some(false)` у
+    /// всех пишущих тулов — «повторный вызов заводит второй комментарий». Для
+    /// `update_*` и `delete_*` это неверно: повторный вызов с теми же
+    /// аргументами оставляет то же состояние, и врать об этом модели нельзя —
+    /// именно на этот хинт она опирается, решая, безопасен ли повтор после
+    /// сетевого сбоя.
     #[test]
-    fn annotations_mark_reads_and_the_two_destructive_tools() {
-        const READ_ONLY: [&str; 6] = [
-            "youtrack_find_issue",
-            "youtrack_search_issues",
-            "youtrack_my_issues",
-            "youtrack_list_projects",
-            "youtrack_find_article",
-            "youtrack_search_articles",
+    fn annotations_match_the_call_policy_table() {
+        // (имя, read_only, destructive, idempotent)
+        const POLICY: [(&str, bool, bool, bool); 28] = [
+            ("youtrack_find_issue", true, false, false),
+            ("youtrack_search_issues", true, false, false),
+            ("youtrack_my_issues", true, false, false),
+            ("youtrack_list_projects", true, false, false),
+            ("youtrack_find_article", true, false, false),
+            ("youtrack_search_articles", true, false, false),
+            ("youtrack_list_comments", true, false, false),
+            ("youtrack_list_article_comments", true, false, false),
+            ("youtrack_apply_command", false, true, false),
+            ("youtrack_update_article", false, true, false),
+            ("youtrack_create_issue", false, false, false),
+            ("youtrack_create_article", false, false, false),
+            ("youtrack_add_comment", false, false, false),
+            ("youtrack_add_article_comment", false, false, false),
+            ("youtrack_update_comment", false, true, true),
+            ("youtrack_delete_comment", false, true, true),
+            ("youtrack_update_article_comment", false, true, true),
+            ("youtrack_delete_article_comment", false, true, true),
+            ("youtrack_whoami", true, false, false),
+            ("youtrack_search_users", true, false, false),
+            ("youtrack_list_attachments", true, false, false),
+            ("youtrack_read_attachment", true, false, false),
+            ("youtrack_list_article_attachments", true, false, false),
+            ("youtrack_read_article_attachment", true, false, false),
+            ("youtrack_upload_attachment", false, false, false),
+            ("youtrack_upload_article_attachment", false, false, false),
+            ("youtrack_delete_attachment", false, true, true),
+            ("youtrack_delete_article_attachment", false, true, true),
         ];
-        const DESTRUCTIVE: [&str; 2] = ["youtrack_update_article", "youtrack_apply_command"];
 
-        for tool in server().tool_router.list_all() {
+        let tools = server().tool_router.list_all();
+        assert_eq!(tools.len(), POLICY.len(), "таблица политики разошлась с роутером");
+
+        for tool in tools {
             let name = tool.name.to_string();
             let ann = tool.annotations.as_ref().unwrap_or_else(|| panic!("{name}: нет аннотаций"));
+            let (_, read_only, destructive, idempotent) = POLICY
+                .iter()
+                .find(|(n, ..)| *n == name)
+                .unwrap_or_else(|| panic!("{name}: тула нет в таблице политики"));
 
-            assert_eq!(
-                ann.read_only_hint,
-                Some(READ_ONLY.contains(&name.as_str())),
-                "{name}: read_only_hint"
-            );
-            if !READ_ONLY.contains(&name.as_str()) {
-                assert_eq!(
-                    ann.destructive_hint,
-                    Some(DESTRUCTIVE.contains(&name.as_str())),
-                    "{name}: destructive_hint"
-                );
-                // Ни одна запись здесь не идемпотентна: повторный вызов
-                // заводит второй комментарий, вторую задачу, вторую статью.
-                assert_eq!(ann.idempotent_hint, Some(false), "{name}: idempotent_hint");
+            assert_eq!(ann.read_only_hint, Some(*read_only), "{name}: read_only_hint");
+            if !*read_only {
+                assert_eq!(ann.destructive_hint, Some(*destructive), "{name}: destructive_hint");
+                assert_eq!(ann.idempotent_hint, Some(*idempotent), "{name}: idempotent_hint");
             }
             assert_eq!(ann.open_world_hint, Some(true), "{name}: ходит во внешнюю систему");
             assert!(ann.title.is_some(), "{name}: нет человекочитаемого title");
