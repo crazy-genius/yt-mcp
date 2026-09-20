@@ -2192,7 +2192,7 @@ dependencies = [
 
 [[package]]
 name = "yt-client"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "reqwest",
@@ -2207,7 +2207,7 @@ dependencies = [
 
 [[package]]
 name = "yt-mcp-core"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "http",
  "rmcp",
@@ -2220,7 +2220,7 @@ dependencies = [
 
 [[package]]
 name = "yt-mcp-server"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",

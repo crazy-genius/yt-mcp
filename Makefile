@@ -1,6 +1,6 @@
 REGISTRY         ?=
 REGISTRY_APP     ?=
-REGISTRY_APP_TAG ?= 0.0.1
+REGISTRY_APP_TAG ?= 0.1.0
 
 IMAGE        = $(REGISTRY)/$(REGISTRY_APP):$(REGISTRY_APP_TAG)
 IMAGE_LATEST = $(REGISTRY)/$(REGISTRY_APP):latest
@@ -16,7 +16,7 @@ run:
 	cargo run -p yt-mcp-server
 
 darwin_oci_build: guard-REGISTRY guard-REGISTRY_APP
-	container build --os linux --arch amd64 -f docker/Dockerfile -t "$(IMAGE)"
+	container build --cpus 6 --memory 16g --os linux --arch amd64 -f docker/Dockerfile -t "$(IMAGE)"
 
 darwin_oci_push: guard-REGISTRY guard-REGISTRY_APP
 	container i tag "$(IMAGE)" "$(IMAGE_LATEST)"
