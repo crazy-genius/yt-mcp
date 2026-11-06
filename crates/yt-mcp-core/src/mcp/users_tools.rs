@@ -7,7 +7,7 @@ use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 impl YoutrackMCPServer {
     #[tool(
         name = "youtrack_whoami",
-        description = "Who the current YouTrack token belongs to: login, full name, email. Call this when the user says 'my issues', 'assign it to me' or 'mention me' without naming a login.",
+        description = "Login, full name and email of the user the YouTrack token belongs to.",
         annotations(title = "Who am I", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn whoami(

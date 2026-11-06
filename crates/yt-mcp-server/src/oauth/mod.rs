@@ -22,12 +22,13 @@ pub struct Pending {
 }
 
 /// Клиент для всех запросов к Hub, включая обнаружение: без редиректов (запрос с
-/// секретом не должен уйти на другой адрес) и с таймаутами.
-pub fn http_client() -> anyhow::Result<reqwest::Client> {
+/// секретом не должен уйти на другой адрес) и с таймаутом, заданным админом
+/// (`MCP_OAUTH_UPSTREAM_TIMEOUT_SECS`); connect-таймаут не больше 10 с.
+pub fn http_client(timeout: Duration) -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+        .connect_timeout(timeout.min(Duration::from_secs(10)))
+        .timeout(timeout)
         .build()?)
 }
 
@@ -46,7 +47,7 @@ pub struct OAuth {
 
 impl OAuth {
     pub fn new(settings: OAuthSettings, hub: HubEndpoints) -> anyhow::Result<Self> {
-        let http = http_client()?;
+        let http = http_client(settings.upstream_timeout)?;
         Ok(Self {
             settings,
             hub,

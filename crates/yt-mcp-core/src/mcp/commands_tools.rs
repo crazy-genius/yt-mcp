@@ -8,7 +8,7 @@ use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 impl YoutrackMCPServer {
     #[tool(
         name = "youtrack_apply_command",
-        description = "Applies a YouTrack command (state/assignee/tag changes) to the issue, e.g. 'state Fixed'",
+        description = "Applies a YouTrack command (YouTrack command language, https://www.jetbrains.com/help/youtrack/server/commands.html) to one issue, e.g. 'state Fixed', 'assignee john', 'tag urgent'.",
         annotations(
             title = "Apply command",
             read_only_hint = false,

@@ -2,6 +2,7 @@ use crate::mcp::YoutrackMCPServer;
 use rmcp::model::Tool;
 
 pub mod mcp;
+mod prompts;
 mod references;
 
 pub fn extract_tools(mcp: &YoutrackMCPServer) -> Vec<Tool> {

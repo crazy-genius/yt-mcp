@@ -57,6 +57,10 @@ async fn authorization_server(State(oauth): State<Arc<OAuth>>) -> Json<Value> {
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
         "scopes_supported": [oauth.hub.scope],
+        // ponytail: флаг CIMD только объявлен — документ клиента не скачивается, redirect
+        // не сверяется с его `redirect_uris` (доверяем `MCP_OAUTH_REDIRECT_URIS`).
+        // Апгрейд: fetch документа по `client_id`-URL и сверка redirect_uri.
+        "client_id_metadata_document_supported": true,
     }))
 }
 

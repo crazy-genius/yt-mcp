@@ -234,9 +234,10 @@ async fn main() -> anyhow::Result<()> {
     let oauth = match config.oauth {
         Some(settings) => {
             let confidential = settings.hub_client_secret.is_some();
-            let hub = discover(&oauth::http_client()?, &config.youtrack_url)
-                .await
-                .context("cannot discover YouTrack Hub OAuth endpoints")?;
+            let hub =
+                discover(&oauth::http_client(settings.upstream_timeout)?, &config.youtrack_url)
+                    .await
+                    .context("cannot discover YouTrack Hub OAuth endpoints")?;
             let oauth = OAuth::new(settings, hub).context("cannot build OAuth state")?;
             // Ни id, ни секрет в лог не идут: только режим клиента.
             tracing::info!(
@@ -491,6 +492,7 @@ mod tests {
                 "http://localhost/callback, http://localhost/cb2?x=1",
             )
             .expect("parses"),
+            upstream_timeout: crate::oauth::config::DEFAULT_UPSTREAM_TIMEOUT,
         };
         let hub_endpoints = HubEndpoints {
             authorization_endpoint: format!("{}/hub/auth", hub.uri()).parse().expect("url"),
@@ -578,6 +580,14 @@ mod tests {
             assert_eq!(a.json["token_endpoint_auth_methods_supported"][0], "none");
             assert_eq!(a.json["grant_types_supported"][1], "refresh_token");
         }
+    }
+
+    #[tokio::test]
+    async fn as_metadata_advertises_cimd_for_public_clients() {
+        let hub = MockServer::start().await;
+        let a = get(app_v2(dead_youtrack(), &hub), "/.well-known/oauth-authorization-server").await;
+        assert_eq!(a.json["client_id_metadata_document_supported"], true);
+        assert_eq!(a.json["token_endpoint_auth_methods_supported"][0], "none");
     }
 
     #[tokio::test]

@@ -37,3 +37,29 @@ async fn call_tool_dispatches_and_reports_a_missing_token() {
 
     client.cancel().await.expect("clean shutdown");
 }
+
+/// `prompts/list` по настоящему проводу отдаёт четыре промпта: capability
+/// объявлена, а `list_prompts` написан руками.
+#[tokio::test]
+async fn prompts_list_serves_the_four_prompts() {
+    let (server_io, client_io) = tokio::io::duplex(4096);
+    let yt = Arc::new(Youtrack::new("https://example.com").expect("youtrack builds"));
+    tokio::spawn(async move {
+        if let Ok(server) = serve_server(YoutrackMCPServer::new(yt), server_io).await {
+            let _ = server.waiting().await;
+        }
+    });
+    let client = ().serve(client_io).await.expect("client connects");
+
+    let mut names: Vec<String> = client
+        .list_all_prompts()
+        .await
+        .expect("prompts/list works")
+        .into_iter()
+        .map(|p| p.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, ["draft_issue", "kb_from_issues", "summarize_issue", "triage_my_issues"]);
+
+    client.cancel().await.expect("clean shutdown");
+}

@@ -1,12 +1,16 @@
 //! Настройки OAuth v2 из окружения и обнаружение endpoint-ов YouTrack Hub.
 
 use std::fmt;
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 use serde::Deserialize;
 use url::Url;
 
 use super::redirect::TrustedRedirects;
+
+/// Таймаут запросов к Hub по умолчанию.
+pub const DEFAULT_UPSTREAM_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Настройки v2. Секрет Hub-клиента не выводится ни в `Debug`, ни в ошибки.
 pub struct OAuthSettings {
@@ -16,6 +20,8 @@ pub struct OAuthSettings {
     /// `None` — публичный клиент (без секрета).
     pub hub_client_secret: Option<String>,
     pub redirects: TrustedRedirects,
+    /// Общий таймаут запроса к Hub (1..=60 с); задаётся `MCP_OAUTH_UPSTREAM_TIMEOUT_SECS`.
+    pub upstream_timeout: Duration,
 }
 
 impl fmt::Debug for OAuthSettings {
@@ -25,6 +31,7 @@ impl fmt::Debug for OAuthSettings {
             .field("hub_client_id", &self.hub_client_id)
             .field("hub_client_secret", &self.hub_client_secret.as_ref().map(|_| "<redacted>"))
             .field("redirects", &self.redirects)
+            .field("upstream_timeout", &self.upstream_timeout)
             .finish()
     }
 }
@@ -54,7 +61,21 @@ pub fn settings_from(
     let redirects = TrustedRedirects::parse(&need(redirects, "MCP_OAUTH_REDIRECT_URIS")?)
         .context("MCP_OAUTH_REDIRECT_URIS")?;
 
-    Ok(Some(OAuthSettings { public_url, hub_client_id, hub_client_secret: secret, redirects }))
+    let upstream_timeout = match var("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS") {
+        None => DEFAULT_UPSTREAM_TIMEOUT,
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(secs) if (1..=60).contains(&secs) => Duration::from_secs(secs),
+            _ => bail!("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS must be an integer 1..=60, got: {raw}"),
+        },
+    };
+
+    Ok(Some(OAuthSettings {
+        public_url,
+        hub_client_id,
+        hub_client_secret: secret,
+        redirects,
+        upstream_timeout,
+    }))
 }
 
 /// `https`, либо `http` только для loopback (локальная разработка).
@@ -189,6 +210,20 @@ mod tests {
         assert!(settings_from(only(&[("HUB_CLIENT_SECRET", "x")])).unwrap().is_none());
         let err = settings_from(only(&[("MCP_PUBLIC_URL", "https://yt-mcp.dev")])).unwrap_err();
         assert!(err.to_string().contains("HUB_CLIENT_ID"), "{err}");
+    }
+
+    #[test]
+    fn the_upstream_timeout_defaults_to_8_seconds_and_is_bounded() {
+        let s = settings_from(env(&[])).unwrap().unwrap();
+        assert_eq!(s.upstream_timeout, Duration::from_secs(8));
+        let s = settings_from(env(&[("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS", "20")])).unwrap().unwrap();
+        assert_eq!(s.upstream_timeout, Duration::from_secs(20));
+        let s = settings_from(env(&[("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS", " ")])).unwrap().unwrap();
+        assert_eq!(s.upstream_timeout, Duration::from_secs(8));
+        for bad in ["0", "61", "abc", "-1"] {
+            let err = settings_from(env(&[("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS", bad)])).unwrap_err();
+            assert!(err.to_string().contains("MCP_OAUTH_UPSTREAM_TIMEOUT_SECS"), "{bad}: {err}");
+        }
     }
 
     #[test]

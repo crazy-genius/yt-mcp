@@ -81,3 +81,27 @@ async fn create_issue_unknown_project_lists_available() {
         .expect_err("must fail");
     assert!(err.to_string().contains("DEMO"));
 }
+
+#[tokio::test]
+async fn update_issue_sends_only_the_given_fields() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/issues/DEMO-1"))
+        .and(body_partial_json(serde_json::json!({"summary": "New title"})))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "$type":"Issue","idReadable":"DEMO-1","summary":"New title"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let issue = service_for(&server.uri())
+        .await
+        .update_issue("DEMO-1", Some("New title"), None)
+        .await
+        .expect("ok");
+    assert_eq!(issue.summary.as_deref(), Some("New title"));
+    // Не переданное описание не должно уйти даже как null — иначе YouTrack его сотрёт.
+    let sent: serde_json::Value =
+        serde_json::from_slice(&server.received_requests().await.unwrap()[0].body).unwrap();
+    assert!(sent.get("description").is_none(), "{sent}");
+}

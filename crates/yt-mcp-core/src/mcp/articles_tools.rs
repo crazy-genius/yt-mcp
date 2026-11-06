@@ -10,7 +10,7 @@ use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 impl YoutrackMCPServer {
     #[tool(
         name = "youtrack_find_article",
-        description = "Read one Knowledge Base article by its human-readable ID, including the full text (content) and its parent/child articles. Optional 'fields' selects returned fields (see youtrack://reference/articles/fields).",
+        description = "Read one Knowledge Base article by its human-readable ID, including the full text (content) and its parent/child articles. Optional 'fields' selects returned fields (see youtrack_reference topic 'article-fields' (resource youtrack://reference/articles/fields)).",
         annotations(title = "Find article", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn find_article(
@@ -27,7 +27,7 @@ impl YoutrackMCPServer {
 
     #[tool(
         name = "youtrack_search_articles",
-        description = "Search the YouTrack Knowledge Base by keywords (all words must occur in title or body, case-insensitive); empty query lists articles. Optional 'project' narrows to one project. Returns titles WITHOUT the body — call youtrack_find_article for the text. Paginated: the result carries 'matched', 'next_skip' (pass it back as 'skip' for the next page, null when exhausted) and 'scan_truncated' (true = not the whole knowledge base was scanned, narrow the query or set 'project').",
+        description = "Search the YouTrack Knowledge Base by keywords (all words must occur in title or body, case-insensitive); empty query lists articles. Optional 'project' narrows to one project. Returns titles WITHOUT the body; the text is in youtrack_find_article. Paginated: the result carries 'matched', 'next_skip' (pass it back as 'skip' for the next page, null when exhausted) and 'scan_truncated' (true = not the whole knowledge base was scanned, narrow the query or set 'project').",
         annotations(
             title = "Search knowledge base",
             read_only_hint = true,
@@ -82,12 +82,12 @@ impl YoutrackMCPServer {
 
     #[tool(
         name = "youtrack_update_article",
-        description = "Rewrites the title and/or the whole body of a Knowledge Base article — read it with youtrack_find_article first and send the complete edited text",
+        description = "Rewrites the title and/or the whole body of a Knowledge Base article (the complete new text replaces the old one)",
         annotations(
             title = "Rewrite article",
             read_only_hint = false,
             destructive_hint = true,
-            idempotent_hint = false,
+            idempotent_hint = true,
             open_world_hint = true
         )
     )]

@@ -165,7 +165,7 @@ impl YoutrackMCPServer {
 
     #[tool(
         name = "youtrack_read_attachment",
-        description = "Read the content of one issue attachment. Text files come back as text, images as an image. Anything else (PDF, docx, archives) is refused with its size and mime type — ask the user to open those in YouTrack. Get 'attachment_id' from youtrack_list_attachments.",
+        description = "Read the content of one issue attachment. Text files come back as text, images as an image. Anything else (PDF, docx, archives) is refused with its size and mime type. Get 'attachment_id' from youtrack_list_attachments.",
         annotations(
             title = "Read issue attachment",
             read_only_hint = true,

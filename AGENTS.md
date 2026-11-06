@@ -47,6 +47,7 @@ Environment (`Config::from_env` in `main.rs`):
 | `HUB_CLIENT_ID` | for v2 | id of the service registered in YouTrack Hub with that callback as its redirect URI |
 | `HUB_CLIENT_SECRET` | no | set: the Hub client is confidential (token requests use Basic auth); unset or blank: public |
 | `MCP_OAUTH_REDIRECT_URIS` | for v2 | comma-separated redirect URIs of MCP clients we may send users back to; exact match, except that a loopback `http` entry (`localhost`, `127.0.0.1`, `[::1]`) accepts any client port; a URI with a fragment or userinfo is never trusted |
+| `MCP_OAUTH_UPSTREAM_TIMEOUT_SECS` | no (v2 only) | total timeout of requests to Hub, parsed only when v2 is configured (ignored otherwise), integer 1..=60, default 8 (connect timeout is min(10 s, this)); empty is unset, a bad value is a startup error |
 
 ### OAuth v2
 
@@ -85,6 +86,25 @@ the scope (the Hub service id) are discovered from `{YOUTRACK_URL}/api/config` a
   client is public. Neither the secret, a `code`, nor any token is logged.
 - Both `access_type=offline` and the `offline_access` scope are currently sent to get a
   `refresh_token` from Hub; one of them should be dropped after checking against a real Hub.
+
+Which mode a client uses is decided by the headers it sends. Hosted clients (claude.ai, Desktop,
+mobile) cannot set custom headers, so they connect through a gateway that sets `X-API-Version` (v2
+for the OAuth flow) in front of this server; Claude Code sets headers itself (see README). The
+Hub-facing OAuth requests use the `MCP_OAUTH_UPSTREAM_TIMEOUT_SECS` timeout because Claude waits
+only about 10 s for discovery, registration and token responses. Startup Hub discovery
+(`discover` in `main.rs`) uses the same client, so a Hub slower than that timeout at boot kills the
+process (the pod restarts until Hub answers). The AS metadata advertises
+`client_id_metadata_document_supported: true`; the client's metadata document is **not** fetched
+(`ponytail:` in `oauth/endpoints.rs`): `/authorize` ignores `client_id`, and a redirect URI is
+trusted only through `MCP_OAUTH_REDIRECT_URIS`, never checked against the client's own document.
+Upgrade path: fetch the document and compare its `redirect_uris`. Loopback entries in
+`MCP_OAUTH_REDIRECT_URIS` ignore only the port; scheme, host and path must match exactly.
+
+**Run a single replica** (or put sticky sessions in front). Three pieces of state live in process
+memory: rmcp's `LocalSessionManager` (sessions identified by `Mcp-Session-Id`; another pod answers
+404 for a foreign id), the OAuth `pending` map (the `/authorize` → `/mcp/auth_callback` state, so
+the callback must land on the pod that started the login) and the `verified` token cache. The
+kustomize base and example overlay set `replicas: 1` for the same reason.
 
 In both modes the tokens ride in headers (v1: `MCP_TOKEN` and the YouTrack token; v2: the Hub
 bearer), so **TLS termination at a reverse proxy is mandatory**: never expose this server over
@@ -153,13 +173,13 @@ crate (pinned by git rev in the workspace `Cargo.toml`).
 
 **`yt-mcp-core`** — the MCP surface over that service. `YoutrackMCPServer` implements
 `rmcp::ServerHandler`.
-- Tools are split into seven `#[tool_router(router = "...", vis = "pub")]` impl blocks
+- Tools (30) are split into eight `#[tool_router(router = "...", vis = "pub")]` impl blocks
   (`issues_tools`, `articles_tools`, `commands_tools`, `projects_tools`, `comments_tools`,
-  `attachments_tools`, `users_tools`); `YoutrackMCPServer::new` sums them into one. The last three
-  are split by *capability*, not by entity: comments and attachments exist on both issues and
-  articles, and putting them next to their entity would have grown `issues_tools` to twelve tools
-  in one file. Adding a tool means adding it to a router block *and* to both tables in the `mcp.rs`
-  tests — the name list, which asserts the router holds exactly those tools, and the call-policy
+  `attachments_tools`, `users_tools`, `reference_tools`); `YoutrackMCPServer::new` sums them into
+  one. `comments_tools`, `attachments_tools` and `users_tools` are split by *capability*, not by
+  entity: comments and attachments exist on both issues and articles, and putting them next to
+  their entity would have grown `issues_tools` to twelve tools in one file. Adding a tool means adding it to a router block *and* to both
+  tables in the `mcp.rs` tests — the name list, which asserts the router holds exactly those tools, and the call-policy
   table.
 - `ServerHandler` is implemented by hand, so `#[tool_handler]` generates nothing: `call_tool`,
   `list_tools` and `get_tool` are all written out. Each has a failure mode when it is missing —
@@ -171,14 +191,39 @@ crate (pinned by git rev in the workspace `Cargo.toml`).
 - YouTrack failures come back as `CallToolResult::error` (`is_error`), not protocol errors: the
   model can act on "project not found" and fix itself. Protocol errors are reserved for our bugs.
 - All argument structs (`FindIssueArgs`, `SearchArticlesArgs`, …) live in `mcp.rs`; their doc
-  comments become the JSON Schema descriptions the LLM reads, so they carry real usage guidance.
+  comments become the JSON Schema descriptions the LLM reads, so they are English only (a test,
+  `tool_schemas_carry_no_cyrillic`, enforces it; notes for developers go in plain `//`).
+- Tool descriptions and schemas state facts (what the tool does, where ids come from); behavioural
+  guidance ("prefer X", "always do Y") lives in `INSTRUCTIONS` in `mcp.rs`, which `get_info`
+  returns as MCP `instructions` next to the server name `yt-mcp` and the `yt-mcp-core` version.
+  `tool_texts_describe_instead_of_steering` fails on steering phrases in tool texts.
+- Successful JSON results are `structuredContent` plus the same value as compact (no indentation)
+  text in `content[0]`. MCP requires `structuredContent` to be an object, so an array is wrapped as
+  `{"items": [...]}`. No `outputSchema` is declared: the `yt-rs` models do not implement
+  `JsonSchema`.
+- `youtrack_search_issues` and `youtrack_my_issues` take `top` (default 50, clamped to 1..=100) and
+  `skip`, and return `{"issues": [...], "next_skip": <int|null>}`; the client asks YouTrack for
+  `top + 1` to know whether another page exists.
+- `youtrack_reference(topic)` (`reference_tools`; `topic` is `query-syntax`, `issue-fields` or
+  `article-fields`) is read-only and returns the same texts as the resources below, for clients
+  that do not expose MCP resources to the model. It still requires the user token like every tool.
+- Four prompts are served from `prompts.rs` (`triage_my_issues`, `summarize_issue`, `draft_issue`,
+  `kb_from_issues`). `list_prompts`/`get_prompt` are written by hand like the other handler
+  methods, and prompts need no token. Their text is English, asks for the user's language, and
+  never writes to YouTrack without the user's confirmation.
 - Call policy lives in MCP annotations (`read_only_hint`, `destructive_hint`, `idempotent_hint`,
   `open_world_hint`, `title`) on the `#[tool(...)]` attribute, not in the description text.
   `annotations_match_the_call_policy_table` in `mcp.rs` holds the whole policy as a table of
-  28 rows and is the place to read it. Eight tools are destructive: `youtrack_update_article`,
-  `youtrack_apply_command`, and the six `update_*`/`delete_*` tools for comments and attachments.
-  The `update_*`/`delete_*` six are `idempotent_hint = true` — a repeat with the same arguments
-  leaves the same state — while everything that *adds* an entity is `idempotent_hint = false`.
+  30 rows and is the place to read it. Nine tools are destructive: `youtrack_update_article`,
+  `youtrack_update_issue`, `youtrack_apply_command`, and the six `update_*`/`delete_*` tools for
+  comments and attachments. Every `update_*`/`delete_*` tool is `idempotent_hint = true` — a
+  repeat with the same arguments leaves the same state — while everything that *adds* an entity is
+  `idempotent_hint = false`, and so is `apply_command` (a command that logs spent time adds a second
+  work item on repeat). Summary and description of an issue change only through
+  `youtrack_update_issue`: YouTrack's command language cannot set them, so `apply_command` is no
+  substitute. A call with neither field is refused locally — an empty POST would come back as the
+  unchanged card and read as a successful edit.
+- `youtrack_apply_command` links the YouTrack command language docs in its description.
 - Three MCP resources are served from `references.rs` (large `&str` consts, not files):
   `youtrack://reference/issues/search/query-syntax`, `.../issues/fields`, `.../articles/fields`.
   These teach the model YouTrack's query language and `fields` syntax.
@@ -199,8 +244,9 @@ changing a default field list, the expected string constants in `service_read.rs
 `service_articles.rs` must be updated too.
 
 `crates/yt-mcp-core/tests/dispatch.rs` runs a real MCP client against the server over an in-memory
-duplex stream: it pins that `tools/list` returns the router's tools and that a tool call without a
-token comes back as a readable `is_error`. That transport has no HTTP headers, so it cannot reach a
+duplex stream: it pins that `tools/list` returns the router's tools, that `prompts/list` returns
+the four prompts, and that a tool call without a token comes back as a readable `is_error`. That
+transport has no HTTP headers, so it cannot reach a
 tool body — the end-to-end check lives in `yt-mcp-server`'s `a_tool_call_travels_from_the_wire_to_youtrack`,
 which drives the full `app()` through `tower::ServiceExt::oneshot` with both headers against a
 `wiremock` YouTrack whose mock matches on `Authorization: Bearer user-token`. That mock being hit is
@@ -214,6 +260,12 @@ reference when adding endpoints.
 strip, base64 decoding with its limit, the https-only URL check and `fetch_bytes`. The URL check
 and the fetch are separate functions precisely so both are testable: wiremock speaks http, while
 the production rule is https-only, so a single combined function could not be covered at all.
+
+Other tests worth knowing: `json_results_are_compact_and_structured` and
+`server_info_names_yt_mcp_and_carries_instructions` in `mcp.rs`; `the_reference_tool_returns_the_resource_text`;
+`search_issues_asks_one_extra_and_reports_next_skip` in `service_read.rs`; in `main.rs::tests`
+`as_metadata_advertises_cimd_for_public_clients`; in `oauth/config.rs`
+`the_upstream_timeout_defaults_to_8_seconds_and_is_bounded`.
 
 OAuth v2 tests: unit tests live next to the code in `crates/yt-mcp-server/src/oauth/*.rs`
 (settings parsing, redirect trust rules, the TTL map, verification). The router-level tests

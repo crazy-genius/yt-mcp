@@ -101,6 +101,11 @@ const DEFAULT_ARTICLE_PAGE: usize = 25;
 const DEFAULT_COMMENT_PAGE: i64 = 50;
 const MAX_COMMENT_PAGE: i64 = 200;
 
+/// Размер страницы поиска задач: по умолчанию и потолок. Список — без
+/// description, но сто карточек с customFields уже заметный кусок контекста.
+const DEFAULT_ISSUE_PAGE: i64 = 50;
+const MAX_ISSUE_PAGE: i64 = 100;
+
 /// Сколько пользователей максимум вытягиваем за раз для локального поиска.
 /// У `/api/users` нет серверного `query` — ни в OpenAPI-спеке, ни в
 /// `ListParams` у yt-rs, — поэтому фильтр локальный.
@@ -126,6 +131,15 @@ pub struct ArticleSearchPage {
     pub next_skip: Option<usize>,
     /// true — просмотрены не все статьи базы: сузь запрос или задай project.
     pub scan_truncated: bool,
+}
+
+/// Страница поиска задач. Как и у `ArticleSearchPage`, граница выдачи едет
+/// в теле ответа: у результата тула нет протокольной пагинации.
+#[derive(Debug, serde::Serialize)]
+pub struct IssueSearchPage {
+    pub issues: Vec<Issue>,
+    /// Значение `skip` для следующей страницы; `null` — страниц больше нет.
+    pub next_skip: Option<i64>,
 }
 
 /// Страница поиска людей. Форма повторяет `ArticleSearchPage` по той же
@@ -316,23 +330,38 @@ impl YoutrackService {
             .await
     }
 
+    /// Страница задач по запросу. У YouTrack просим `top + 1`: лишний элемент
+    /// — единственный честный признак того, что за страницей есть ещё.
     pub async fn search_issues(
         &self,
         query: &str,
         fields: Option<Vec<String>>,
-    ) -> yt_rs::Result<Vec<Issue>> {
+        top: Option<i64>,
+        skip: Option<i64>,
+    ) -> yt_rs::Result<IssueSearchPage> {
+        let top = top.unwrap_or(DEFAULT_ISSUE_PAGE).clamp(1, MAX_ISSUE_PAGE);
+        let skip = skip.unwrap_or(0).max(0);
         let params = IssueSearchParams::default()
             .query(query.to_owned())
             .fields(Self::fields_query(fields, Self::default_list_fields))
-            .top(100);
-        self.client.issues_api().list(params).await
+            .top(top + 1)
+            .skip(skip);
+        let mut issues = self.client.issues_api().list(params).await?;
+        let next_skip = (issues.len() as i64 > top).then_some(skip.saturating_add(top));
+        issues.truncate(top as usize);
+        Ok(IssueSearchPage { issues, next_skip })
     }
 
-    pub async fn my_issues(&self, assignee: &str) -> yt_rs::Result<Vec<Issue>> {
+    pub async fn my_issues(
+        &self,
+        assignee: &str,
+        top: Option<i64>,
+        skip: Option<i64>,
+    ) -> yt_rs::Result<IssueSearchPage> {
         // Фигурные скобки — экранирование значения в языке запросов YouTrack:
         // без них «Ivan Petrov» разваливается на assignee и поиск по тексту.
         let query = format!("assignee: {{{assignee}}} #Unresolved");
-        self.search_issues(&query, None).await
+        self.search_issues(&query, None, top, skip).await
     }
 
     fn project_fields() -> FieldsQuery {
@@ -414,6 +443,33 @@ impl YoutrackService {
             )
             .await?;
         Ok(created)
+    }
+
+    /// Обновляет заголовок и/или описание задачи и возвращает полную карточку.
+    /// Не переданные поля YouTrack оставляет как есть — это patch, а не
+    /// replace: `None` не сериализуется, поэтому описание не стирается.
+    pub async fn update_issue(
+        &self,
+        id: &str,
+        summary: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<Issue, WriteError> {
+        let issue = Issue {
+            summary: summary.map(str::to_owned),
+            description: description.map(str::to_owned),
+            ..Default::default()
+        };
+        let updated = self
+            .client
+            .issues_api()
+            .update(
+                id,
+                &issue,
+                MutationParams::default()
+                    .fields(Self::fields_query(None, Self::default_issue_fields)),
+            )
+            .await?;
+        Ok(updated)
     }
 
     /// Добавляет текстовый комментарий к задаче.
