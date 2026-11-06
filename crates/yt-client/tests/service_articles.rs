@@ -172,60 +172,6 @@ async fn update_article_sends_only_given_fields() {
     assert_eq!(article.id_readable.as_deref(), Some("DEMO-A-4"));
 }
 
-const LIST_FIELDS: &str = "$type,idReadable,summary,updated,hasChildren,\
-project(shortName,name),parentArticle(idReadable,summary)";
-
-#[tokio::test]
-async fn list_articles_page_passes_top_and_skip() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/articles"))
-        .and(query_param("fields", LIST_FIELDS))
-        .and(query_param("$top", "200"))
-        .and(query_param("$skip", "400"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"$type": "Article", "idReadable": "DEMO-A-7", "summary": "s", "updated": 1700000000000i64}
-        ])))
-        .mount(&server)
-        .await;
-
-    let page = service_for(&server.uri()).await.list_articles_page(200, 400).await.expect("ok");
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0].id_readable.as_deref(), Some("DEMO-A-7"));
-    assert_eq!(page[0].updated, Some(1700000000000));
-    assert!(page[0].content.is_none(), "листинг не должен тащить content");
-}
-
-#[tokio::test]
-async fn list_project_articles_page_resolves_short_name() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/api/admin/projects"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"$type": "Project", "id": "0-5", "shortName": "BSA"}
-        ])))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/admin/projects/0-5/articles"))
-        .and(query_param("fields", LIST_FIELDS))
-        .and(query_param("$top", "200"))
-        .and(query_param("$skip", "0"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-            {"$type": "Article", "idReadable": "BSA-A-313", "summary": "s", "updated": 1i64}
-        ])))
-        .mount(&server)
-        .await;
-
-    let page = service_for(&server.uri())
-        .await
-        .list_project_articles_page("BSA", 200, 0)
-        .await
-        .expect("ok");
-    assert_eq!(page[0].id_readable.as_deref(), Some("BSA-A-313"));
-    assert!(page[0].content.is_none(), "листинг не должен тащить тело статьи");
-}
-
 #[tokio::test]
 async fn add_article_comment_posts_text() {
     let server = MockServer::start().await;

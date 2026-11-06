@@ -30,7 +30,7 @@ async fn my_issues_filters_by_assignee_and_unresolved() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/issues"))
-        .and(query_param("query", "assignee: alice #Unresolved"))
+        .and(query_param("query", "assignee: {alice} #Unresolved"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
             { "$type": "Issue", "idReadable": "DEMO-2", "summary": "Task A" }
         ])))
@@ -41,6 +41,22 @@ async fn my_issues_filters_by_assignee_and_unresolved() {
     let issues = svc.my_issues("alice").await.expect("ok");
     assert_eq!(issues.len(), 1);
     assert_eq!(issues[0].id_readable.as_deref(), Some("DEMO-2"));
+}
+
+/// Без скобок `assignee: Ivan Petrov` YouTrack читает как «assignee Ivan и
+/// где-то в тексте Petrov» — без ошибки, просто не те задачи.
+#[tokio::test]
+async fn my_issues_keeps_a_value_with_spaces_in_one_piece() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/issues"))
+        .and(query_param("query", "assignee: {Ivan Petrov} #Unresolved"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    service_for(&server.uri()).await.my_issues("Ivan Petrov").await.expect("ok");
 }
 
 const LIST_FIELDS: &str = "$type,idReadable,summary,created,updated,resolved,\

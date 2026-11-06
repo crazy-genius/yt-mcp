@@ -10,7 +10,7 @@ use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 impl YoutrackMCPServer {
     #[tool(
         name = "youtrack_find_article",
-        description = "Read one Knowledge Base article by its human-readable ID, including the full text (content) and its parent/child articles. Optional 'fields' selects returned fields (see youtrack://reference/articles).",
+        description = "Read one Knowledge Base article by its human-readable ID, including the full text (content) and its parent/child articles. Optional 'fields' selects returned fields (see youtrack://reference/articles/fields).",
         annotations(title = "Find article", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn find_article(

@@ -33,7 +33,17 @@ fn plan_read(mime: Option<&str>, size: Option<i64>) -> Result<ReadPlan, String> 
     // на решение, а точное сравнение бы ломали.
     let full = mime.unwrap_or("application/octet-stream").to_lowercase();
     let mime = full.split(';').next().unwrap_or(&full).trim();
-    let size = size.unwrap_or(0);
+    // Неизвестный размер — отказ, а не «ноль»: `base64Content` приезжает в
+    // память целиком, до проверки в `content_block`, и `null` здесь снял бы
+    // лимит совсем. Бинари отказываются ниже и так, им размер не нужен.
+    let known = |size: Option<i64>| {
+        size.ok_or_else(|| {
+            format!(
+                "YouTrack did not report the size of this '{mime}' attachment, so it is not \
+                 downloaded — ask the user to open it in YouTrack instead"
+            )
+        })
+    };
 
     let textual = mime.starts_with("text/")
         || matches!(mime, "application/json" | "application/xml" | "application/yaml")
@@ -42,6 +52,7 @@ fn plan_read(mime: Option<&str>, size: Option<i64>) -> Result<ReadPlan, String> 
         || mime.ends_with("+yaml");
 
     if textual {
+        let size = known(size)?;
         if size > MAX_READ_TEXT_BYTES {
             return Err(format!(
                 "text attachment too large: {size} bytes, limit is {MAX_READ_TEXT_BYTES}"
@@ -51,6 +62,7 @@ fn plan_read(mime: Option<&str>, size: Option<i64>) -> Result<ReadPlan, String> 
     }
 
     if mime.starts_with("image/") {
+        let size = known(size)?;
         if size > MAX_READ_IMAGE_BYTES {
             return Err(format!(
                 "image attachment too large: {size} bytes, limit is {MAX_READ_IMAGE_BYTES}"
@@ -59,6 +71,7 @@ fn plan_read(mime: Option<&str>, size: Option<i64>) -> Result<ReadPlan, String> 
         return Ok(ReadPlan::Image);
     }
 
+    let size = size.map_or("unknown".to_owned(), |size| size.to_string());
     Err(format!(
         "cannot read '{mime}' ({size} bytes) as text or an image — ask the user to open it \
          in YouTrack instead"
@@ -80,9 +93,8 @@ fn upload_source(
 }
 
 /// Второй, финальный лимит — уже по байтам, которые реально приехали вторым
-/// (content) запросом, а не по `size` из первого (meta). `size` бывает
-/// `null` (YouTrack не всегда его считает, поэтому у yt-rs он `Option`), и
-/// тогда `plan_read` решал бы по `unwrap_or(0)` — то есть вообще без лимита.
+/// (content) запросом, а не по `size` из первого (meta): `size` — это то, что
+/// YouTrack *сказал*, а не то, что он отдал.
 fn content_block(content: AttachmentContent, plan: ReadPlan) -> Result<ContentBlock, String> {
     let limit = match plan {
         ReadPlan::Text => MAX_READ_TEXT_BYTES,
@@ -378,10 +390,20 @@ mod tests {
         assert!(plan_read(Some("text/plain"), Some(MAX_READ_TEXT_BYTES)).is_ok());
     }
 
-    /// `size` из meta может быть `null` (YouTrack его не всегда считает), и
-    /// тогда `plan_read` решает по `unwrap_or(0)` — без реального лимита.
-    /// `content_block` обязан перепроверить лимит по байтам, которые
-    /// действительно приехали вторым (content) запросом.
+    /// Неизвестный размер — не «ноль»: `base64Content` приезжает целиком в
+    /// память до любой проверки, и картинка на 150 MB уронила бы под с
+    /// лимитом 256 MiB раньше, чем `content_block` успел бы её отклонить.
+    #[test]
+    fn an_unknown_size_is_refused_before_downloading() {
+        for mime in ["text/plain", "image/png"] {
+            let err = plan_read(Some(mime), None).expect_err("must refuse");
+            assert!(err.contains("size"), "{mime}: {err}");
+        }
+    }
+
+    /// `size` из meta — заявление YouTrack, а не факт. `content_block` обязан
+    /// перепроверить лимит по байтам, которые действительно приехали вторым
+    /// (content) запросом.
     #[test]
     fn content_block_rechecks_the_downloaded_size_against_the_chosen_plan() {
         let content = AttachmentContent {

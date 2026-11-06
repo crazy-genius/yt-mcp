@@ -1,10 +1,12 @@
-## 🚴 Usage
+# yt-mcp
 
-### 🐑 Use `cargo generate` to Clone this Template
+MCP-сервер для YouTrack: агенты (Claude Code и другие MCP-клиенты) ищут и правят задачи, статьи,
+комментарии и вложения от имени пользователя, приславшего свой YouTrack-токен.
 
-[Learn more about `cargo generate` here.](https://github.com/ashleygwilliams/cargo-generate)
-
+```sh
+YOUTRACK_URL=https://youtrack.example.com MCP_TOKEN=... make run   # POST /mcp на 127.0.0.1:8080
+cargo test --workspace && make lint
 ```
-cargo generate --git https://github.com/rustwasm/wasm-pack-template.git --name my-project
-cd my-project
-```
+
+Окружение, авторизация, архитектура и тесты описаны в [AGENTS.md](AGENTS.md); деплой — в
+[deployments/kustomize/README.md](deployments/kustomize/README.md) и `docker/Dockerfile`.

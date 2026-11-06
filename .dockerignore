@@ -2,7 +2,10 @@
 
 /.git
 /.idea
-/deployment
+/deployments
+/graphify-out
+/.superpowers
+/.claude
 /docs
 
 # Секреты рядом не пробегали.

@@ -223,7 +223,7 @@ impl ServerHandler for YoutrackMCPServer {
 pub struct FindIssueArgs {
     /// Human-readable issue id, e.g. "DEMO-123"
     pub id: String,
-    /// Optional field selection (see resource youtrack://reference/fields).
+    /// Optional field selection (see resource youtrack://reference/issues/fields).
     /// Omit for the sensible default. Nested selection allowed, e.g.
     /// "customFields(name,value(name,login,fullName))". Список не должен
     /// быть пустым — пустой массив вырождается в ответ с одним `$type`.
@@ -233,9 +233,9 @@ pub struct FindIssueArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchIssuesArgs {
-    /// YouTrack query language string (see resource youtrack://reference/query-syntax)
+    /// YouTrack query language string (see resource youtrack://reference/issues/search/query-syntax)
     pub query: String,
-    /// Optional field selection (see resource youtrack://reference/fields).
+    /// Optional field selection (see resource youtrack://reference/issues/fields).
     /// Список не должен быть пустым — пустой массив вырождается в ответ
     /// с одним `$type`.
     #[serde(default)]
@@ -282,7 +282,7 @@ pub struct AddCommentArgs {
 pub struct FindArticleArgs {
     /// Human-readable article id, e.g. "DEMO-A-4"
     pub id: String,
-    /// Optional field selection (see resource youtrack://reference/articles).
+    /// Optional field selection (see resource youtrack://reference/articles/fields).
     /// Omit for the sensible default (includes the full `content`).
     #[serde(default)]
     pub fields: Option<Vec<String>>,
@@ -666,6 +666,29 @@ mod tests {
                 "{}: политика осталась в описании",
                 tool.name
             );
+        }
+    }
+
+    /// Описание тула и схема его аргументов — единственное, откуда модель
+    /// узнаёт адрес справочника. Адрес, которого нет в `list_resources`,
+    /// она запросит и получит «resource not found», поэтому каждая
+    /// подстрока `youtrack://` обязана быть одной из трёх констант.
+    #[test]
+    fn tools_point_only_at_resources_that_exist() {
+        let known = [RESOURCE_QUERY_SYNTAX, RESOURCE_ISSUE_FIELDS, RESOURCE_ARTICLE_FIELDS];
+        for tool in server().tool_router.list_all() {
+            let text = format!(
+                "{} {}",
+                tool.description.as_deref().unwrap_or_default(),
+                serde_json::Value::Object((*tool.input_schema).clone())
+            );
+            for (at, _) in text.match_indices("youtrack://") {
+                let uri: String = text[at..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "/:-_".contains(*c))
+                    .collect();
+                assert!(known.contains(&uri.as_str()), "{}: нет ресурса {uri}", tool.name);
+            }
         }
     }
 }

@@ -9,7 +9,7 @@ use rmcp::{ErrorData as McpError, model::CallToolResult, tool, tool_router};
 impl YoutrackMCPServer {
     #[tool(
         name = "youtrack_find_issue",
-        description = "Get complete information about a YouTrack issue by its human-readable ID. Optional 'fields' selects returned fields (see youtrack://reference/fields).",
+        description = "Get complete information about a YouTrack issue by its human-readable ID. Optional 'fields' selects returned fields (see youtrack://reference/issues/fields).",
         annotations(title = "Find issue", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn find_issue(
@@ -26,7 +26,7 @@ impl YoutrackMCPServer {
 
     #[tool(
         name = "youtrack_search_issues",
-        description = "Search YouTrack issues using YouTrack query language. Optional 'fields' selects returned fields (see youtrack://reference/fields).",
+        description = "Search YouTrack issues using YouTrack query language. Optional 'fields' selects returned fields (see youtrack://reference/issues/fields).",
         annotations(title = "Search issues", read_only_hint = true, open_world_hint = true)
     )]
     pub async fn search_issues(

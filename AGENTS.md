@@ -69,9 +69,15 @@ Reading an attachment costs two requests on purpose: metadata first (`mimeType`,
 content only if the mime is text or an image and the reported size fits `MAX_READ_TEXT_BYTES`
 (256 KiB) / `MAX_READ_IMAGE_BYTES` (5 MiB). One request would be shorter, but a 200 MB PDF would
 travel into the server's memory only to be refused afterwards. `size` can come back `null` (YouTrack
-does not always compute it), so that first check alone is not a real limit — `content_block` in
+does not always compute it); a text or image with an unknown size is refused, not read, because
+`base64Content` arrives whole before any later check could stop it — treating `null` as zero would
+let one big image OOM the pod. `size` is still only what YouTrack *claims*, so `content_block` in
 `yt-mcp-core` re-checks the same limit against `content.bytes.len()`, the size of what the second
 request actually returned, before building the tool result.
+
+Every YouTrack API call shares one `reqwest::Client` built with a 10 s connect timeout and a 120 s
+total timeout (room for a 10 MiB upload): reqwest's default is to wait forever, and a YouTrack that
+accepts the connection and goes silent would otherwise hang the tool call and its session.
 
 ## Architecture
 
@@ -161,7 +167,8 @@ and the fetch are separate functions precisely so both are testable: wiremock sp
 the production rule is https-only, so a single combined function could not be covered at all.
 
 `crates/yt-mcp-core/src/mcp/attachments_tools.rs` unit-tests `plan_read` — which mime becomes
-text, which becomes an image, and which is refused before anything is downloaded — and separately
+text, which becomes an image, and which is refused before anything is downloaded (including any
+text or image whose `size` is `null`) — and separately
 `content_block`, which re-checks the same limit against the bytes the content request actually
 returned, independent of what `size` said in the metadata request.
 
@@ -171,4 +178,3 @@ Doc comments and inline explanations in this codebase are written in Russian; ke
 editing existing modules. `ponytail:` comments mark deliberate simplifications with a named ceiling
 and upgrade path.
 
-`README.md` is an unmodified `wasm-pack-template` leftover and describes nothing about this project.

@@ -23,7 +23,13 @@ impl Youtrack {
     /// процесса, а не на первом вызове тула.
     pub fn new(base_url: impl Into<String>) -> yt_rs::Result<Self> {
         let base_url = base_url.into();
-        let http = Client::new();
+        // Без таймаутов reqwest ждёт вечно: YouTrack (или прокси перед ним),
+        // принявший соединение и замолчавший, подвесил бы вызов тула вместе с
+        // сессией. 120 с — с запасом на загрузку вложения в MAX_ATTACHMENT_BYTES.
+        let http = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()?;
         // Пробное построение: разбор URL живёт внутри YoutrackClient::new,
         // отдельного парсера наружу yt-rs не даёт.
         YoutrackClient::new(
@@ -323,7 +329,9 @@ impl YoutrackService {
     }
 
     pub async fn my_issues(&self, assignee: &str) -> yt_rs::Result<Vec<Issue>> {
-        let query = format!("assignee: {assignee} #Unresolved");
+        // Фигурные скобки — экранирование значения в языке запросов YouTrack:
+        // без них «Ivan Petrov» разваливается на assignee и поиск по тексту.
+        let query = format!("assignee: {{{assignee}}} #Unresolved");
         self.search_issues(&query, None).await
     }
 
@@ -610,37 +618,6 @@ impl YoutrackService {
         let next_skip = (skip + articles.len() < matched).then_some(skip + articles.len());
 
         Ok(ArticleSearchPage { articles, matched, next_skip, scan_truncated })
-    }
-
-    /// Страница списка статей для инкрементального синка: только метаданные,
-    /// без `content`.
-    ///
-    /// В отличие от `search_articles` не упирается в `ARTICLE_SCAN_LIMIT` и
-    /// ничего не фильтрует — вызывающий листает сам, пока страница приходит
-    /// полной. Нужен `kb-index`, чтобы сравнивать `updated` по всей базе знаний.
-    pub async fn list_articles_page(&self, top: i64, skip: i64) -> yt_rs::Result<Vec<Article>> {
-        let params = ListParams::default()
-            .top(top)
-            .skip(skip)
-            .fields(Self::fields_query(None, Self::default_article_list_fields));
-        self.client.articles_api().list(params).await
-    }
-
-    /// То же в границах одного проекта: у `/api/articles` фильтра по проекту
-    /// нет, поэтому при заданном списке проектов синк идёт сюда, по одному
-    /// проекту за раз.
-    pub async fn list_project_articles_page(
-        &self,
-        short_name: &str,
-        top: i64,
-        skip: i64,
-    ) -> Result<Vec<Article>, WriteError> {
-        let project_id = self.resolve_project_id(short_name).await?;
-        let params = ListParams::default()
-            .top(top)
-            .skip(skip)
-            .fields(Self::fields_query(None, Self::default_article_list_fields));
-        Ok(self.client.projects_api().articles(&project_id, params).await?)
     }
 
     /// Создаёт статью в проекте по shortName; `parent_id` (idReadable другой
