@@ -162,16 +162,15 @@ async fn authorize(State(oauth): State<Arc<OAuth>>, Query(q): Query<AuthorizeQue
     }
 
     let callback = oauth.callback_url();
-    let scope = format!("{} offline_access", oauth.hub.scope);
-    // ponytail: refresh просится и scope-ом, и access_type — Task 9 проверяет
-    // на реальном Hub, какой сработал, и лишний удаляется.
+    // refresh_token Hub выдаёт по `access_type=offline` (документация Hub,
+    // Authorization Code); scope `offline_access` он не описывает.
     redirect_with(
         oauth.hub.authorization_endpoint.clone(),
         &[
             ("response_type", "code"),
             ("client_id", &oauth.settings.hub_client_id),
             ("redirect_uri", &callback),
-            ("scope", &scope),
+            ("scope", &oauth.hub.scope),
             ("access_type", "offline"),
             ("state", &ours),
             ("code_challenge", challenge),

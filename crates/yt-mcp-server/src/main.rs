@@ -710,8 +710,7 @@ mod tests {
         assert_eq!(q["code_challenge"], "CHAL");
         assert_eq!(q["code_challenge_method"], "S256");
         assert_eq!(q["access_type"], "offline");
-        assert!(q["scope"].split(' ').any(|s| s == "svc-1"));
-        assert!(q["scope"].split(' ').any(|s| s == "offline_access"));
+        assert_eq!(q["scope"], "svc-1", "только serviceId YouTrack, без offline_access");
         assert_ne!(q["state"], "cs", "в Hub уходит наш state, не клиентский");
     }
 

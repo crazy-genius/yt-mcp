@@ -84,8 +84,9 @@ the scope (the Hub service id) are discovered from `{YOUTRACK_URL}/api/config` a
 - `/token` proxies to Hub, rewriting `client_id` and `redirect_uri` (not added for
   `grant_type=refresh_token`); Basic auth to Hub when `HUB_CLIENT_SECRET` is set, otherwise the
   client is public. Neither the secret, a `code`, nor any token is logged.
-- Both `access_type=offline` and the `offline_access` scope are currently sent to get a
-  `refresh_token` from Hub; one of them should be dropped after checking against a real Hub.
+- `/authorize` asks Hub for a `refresh_token` with `access_type=offline` and `scope` equal to the
+  YouTrack service id only, as Hub's Authorization Code docs describe; Hub does not document an
+  `offline_access` scope. Hub issues the refresh token on the first code exchange for a user.
 
 Which mode a client uses is decided by the headers it sends. Hosted clients (claude.ai, Desktop,
 mobile) cannot set custom headers, so they connect through a gateway that sets `X-API-Version` (v2
