@@ -33,6 +33,28 @@ const RESOURCE_ARTICLE_FIELDS: &str = "youtrack://reference/articles/fields";
 /// Уровень 1 (`Authorization`) снимается axum-слоем до MCP и сюда не доходит.
 pub const USER_TOKEN_HEADER: &str = "x-youtrack-token";
 
+/// Заголовок выбора режима: `X-API-Version: v2` включает OAuth-режим, где токен
+/// пользователя приходит в `Authorization`, а не в `X-YouTrack-Token`.
+pub const API_VERSION_HEADER: &str = "x-api-version";
+
+/// `true`, если клиент просит режим v2. Значение обрезается и сравнивается
+/// без учёта регистра; любой другой заголовок или его отсутствие — это v1.
+pub fn api_v2(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(API_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("v2"))
+}
+
+/// Токен из `Authorization: Bearer <token>`. Схема регистронезависима
+/// (RFC 6750), токен обрезается; пустой токен или другая схема — `None`.
+pub fn bearer(headers: &http::HeaderMap) -> Option<&str> {
+    let value = headers.get(http::header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
 const NO_TOKEN_MSG: &str = "no YouTrack token: add the X-YouTrack-Token header to this \
 server's entry in your MCP client configuration";
 
@@ -61,10 +83,17 @@ impl std::fmt::Debug for UserToken {
 /// По той же причине значение обрезается: пробел, доехавший из конфига
 /// вместе со скопированным токеном, ушёл бы в YouTrack внутри
 /// `Authorization: Bearer` и вернул 401, который нечем объяснить.
+///
+/// В режиме v2 (`X-API-Version: v2`) токен берётся из `Authorization: Bearer`,
+/// а `X-YouTrack-Token` игнорируется; v1 читает `X-YouTrack-Token`.
 pub(crate) fn user_token(extensions: &rmcp::model::Extensions) -> Option<String> {
-    extensions
-        .get::<http::request::Parts>()
-        .and_then(|parts| parts.headers.get(USER_TOKEN_HEADER))
+    let parts = extensions.get::<http::request::Parts>()?;
+    if api_v2(&parts.headers) {
+        return bearer(&parts.headers).map(str::to_owned);
+    }
+    parts
+        .headers
+        .get(USER_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|token| !token.is_empty())
@@ -582,6 +611,56 @@ mod tests {
             Some("secret".to_owned()),
             "HTTP-заголовки регистронезависимы"
         );
+    }
+
+    fn headers(pairs: &[(&str, &str)]) -> http::HeaderMap {
+        let mut map = http::HeaderMap::new();
+        for (name, value) in pairs {
+            map.append(
+                http::header::HeaderName::from_bytes(name.as_bytes()).expect("name"),
+                http::HeaderValue::from_str(value).expect("value"),
+            );
+        }
+        map
+    }
+
+    fn ext(pairs: &[(&str, &str)]) -> rmcp::model::Extensions {
+        let mut request = http::Request::builder();
+        for (name, value) in pairs {
+            request = request.header(*name, *value);
+        }
+        let (parts, ()) = request.body(()).expect("request builds").into_parts();
+        let mut ext = rmcp::model::Extensions::new();
+        ext.insert(parts);
+        ext
+    }
+
+    #[test]
+    fn api_v2_is_case_and_whitespace_insensitive() {
+        assert!(api_v2(&headers(&[("X-API-Version", "v2")])));
+        assert!(api_v2(&headers(&[("X-API-Version", " V2 ")])));
+        assert!(!api_v2(&headers(&[("X-API-Version", "v1")])));
+        assert!(!api_v2(&headers(&[])));
+    }
+
+    #[test]
+    fn bearer_accepts_any_scheme_case_and_refuses_an_empty_token() {
+        assert_eq!(bearer(&headers(&[("Authorization", "Bearer abc")])), Some("abc"));
+        assert_eq!(bearer(&headers(&[("Authorization", "bearer abc")])), Some("abc"));
+        assert_eq!(bearer(&headers(&[("Authorization", "Bearer   ")])), None);
+        assert_eq!(bearer(&headers(&[("Authorization", "Basic abc")])), None);
+    }
+
+    #[test]
+    fn in_v2_the_user_token_comes_from_authorization_not_x_youtrack_token() {
+        let v2 = ext(&[
+            ("X-API-Version", "v2"),
+            ("Authorization", "Bearer hub-token"),
+            ("X-YouTrack-Token", "perm-token"),
+        ]);
+        assert_eq!(user_token(&v2).as_deref(), Some("hub-token"));
+        let v1 = ext(&[("Authorization", "Bearer mcp-secret"), ("X-YouTrack-Token", "perm-token")]);
+        assert_eq!(user_token(&v1).as_deref(), Some("perm-token"));
     }
 
     /// Политика вызова живёт в аннотациях, а не в тексте описания. Таблица
