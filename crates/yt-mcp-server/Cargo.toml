@@ -24,6 +24,20 @@ tokio = { workspace = true, default-features = true, features = ["rt", "rt-multi
 # error handling
 anyhow = { workspace = true }
 
+# разбор redirect URI
+url = { workspace = true }
+
+# http-клиент для обнаружения Hub и обмена кодов
+reqwest = { workspace = true, features = ["rustls", "json", "form"] }
+
+# JSON-ответы Hub
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, default-features = true }
+
+# случайный state и его кодирование
+getrandom = "0.4"
+base64 = { workspace = true }
+
 # constant-time secret comparison
 subtle = { workspace = true }
 
@@ -34,4 +48,3 @@ tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 wiremock = { workspace = true }
-serde_json = { workspace = true, default-features = true }

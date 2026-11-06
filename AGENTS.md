@@ -23,8 +23,9 @@ warnings are build failures in CI-equivalent checks.
 
 ## Runtime surface
 
-One HTTP endpoint: `POST /mcp`, rmcp's streamable-HTTP transport. Two independent authorizations,
-both headers, both required for a tool call:
+One MCP endpoint: `POST /mcp`, rmcp's streamable-HTTP transport. With OAuth v2 configured (see
+"OAuth v2" below) the server also serves the OAuth routes next to it. By default (v1) there are
+two independent authorizations, both headers, both required for a tool call:
 
 - `Authorization: Bearer <MCP_TOKEN>` — level 1, a static gate on the server itself. Enforced by an
   axum layer *in front of* `StreamableHttpService`, so an unauthorized caller never establishes an
@@ -42,9 +43,57 @@ Environment (`Config::from_env` in `main.rs`):
 | `MCP_TOKEN` | yes | the level-1 bearer secret; an empty value is refused at startup, because `""` would match `""` in the gate and let everyone in |
 | `MCP_BIND` | no | listen address, default `127.0.0.1:8080` |
 | `MCP_ALLOWED_HOSTS` | no | comma-separated `Host` allowlist for the transport; rmcp's default is loopback only, and reverse proxies forward the original `Host`, so without it a proxied deployment gets `403 Forbidden: Host header is not allowed` on every request |
+| `MCP_PUBLIC_URL` | for v2 | external https origin of this server (`https://yt-mcp.dev`; `http` only for loopback; no path, query, fragment or userinfo — startup error otherwise): the OAuth `issuer`, the protected `resource`, and the base of the Hub callback `{MCP_PUBLIC_URL}/mcp/auth_callback` |
+| `HUB_CLIENT_ID` | for v2 | id of the service registered in YouTrack Hub with that callback as its redirect URI |
+| `HUB_CLIENT_SECRET` | no | set: the Hub client is confidential (token requests use Basic auth); unset or blank: public |
+| `MCP_OAUTH_REDIRECT_URIS` | for v2 | comma-separated redirect URIs of MCP clients we may send users back to; exact match, except that a loopback `http` entry (`localhost`, `127.0.0.1`, `[::1]`) accepts any client port; a URI with a fragment or userinfo is never trusted |
 
-Both tokens ride in headers, so **TLS termination at a reverse proxy is mandatory**: never expose
-this server over plain HTTP.
+### OAuth v2
+
+A client opts in per request with `X-API-Version: v2`. Then `Authorization: Bearer` carries the
+user's own YouTrack Hub token instead of `MCP_TOKEN` + `X-YouTrack-Token`, and the server is an
+OAuth proxy in front of Hub so clients log in without manual setup. v2 is on only when
+`MCP_PUBLIC_URL`, `HUB_CLIENT_ID` and `MCP_OAUTH_REDIRECT_URIS` are all set; some of them is a
+startup error naming the missing one, none of them leaves v2 off. At startup the Hub endpoints and
+the scope (the Hub service id) are discovered from `{YOUTRACK_URL}/api/config` and Hub's
+`.well-known/oauth-authorization-server`; failure kills the process, and `main` returns
+`anyhow::Result` so the whole error chain is printed. `MCP_TOKEN` stays required for v1.
+
+- The OAuth routes (`/.well-known/*`, `/register`, `/authorize`, `/mcp/auth_callback`, `/token`)
+  are mounted outside the level-1 gate, otherwise a client without a token could not start the
+  login. `/mcp` itself stays behind the gate.
+- In v1 the gate strips `X-API-Version` before the transport, so core never takes `Authorization`
+  as a YouTrack token unless the gate verified it as v2. If v2 is not configured the header is
+  simply ignored and the request is treated as v1.
+- In v2 the gate does not check `MCP_TOKEN`. A bearer equal to `MCP_TOKEN` is refused with
+  `invalid_token` without contacting YouTrack, so the server secret is never sent upstream. A
+  missing or empty bearer gets 401 with the `resource_metadata` challenge (no `error=`); the scheme
+  is case-insensitive.
+- Verification is a request to YouTrack as the bearer. YouTrack 401/403 (and yt-rs `ApiError`)
+  means 401 `invalid_token`; any other status or transport failure means 502. Successes are cached
+  60 s (so a revoked token works for up to a minute), failures are never cached. Verification
+  happens in the gate, before the transport, because the attachment-by-URL download runs before any
+  YouTrack call and an unverified request reaching a tool is an SSRF vector.
+- `/register` is stateless: it validates the client's redirect URIs against
+  `MCP_OAUTH_REDIRECT_URIS` and always hands out `client_id` `yt-mcp`.
+- `/authorize` stores the client's redirect URI and `state` under our own CSPRNG `state` (TTL
+  600 s, at most 10 000 entries) and sends the browser to Hub with `client_id=HUB_CLIENT_ID` and our
+  callback as `redirect_uri`; `/mcp/auth_callback` maps it back, keeping any query the client's URI
+  already had and omitting `state` when the client sent none.
+- `/token` proxies to Hub, rewriting `client_id` and `redirect_uri` (not added for
+  `grant_type=refresh_token`); Basic auth to Hub when `HUB_CLIENT_SECRET` is set, otherwise the
+  client is public. Neither the secret, a `code`, nor any token is logged.
+- Both `access_type=offline` and the `offline_access` scope are currently sent to get a
+  `refresh_token` from Hub; one of them should be dropped after checking against a real Hub.
+
+In both modes the tokens ride in headers (v1: `MCP_TOKEN` and the YouTrack token; v2: the Hub
+bearer), so **TLS termination at a reverse proxy is mandatory**: never expose this server over
+plain HTTP.
+
+Known limitations of v2: a token that expires or is revoked upstream keeps passing the gate for up
+to 60 s (the verification cache), and its tool calls then fail as `is_error` results rather than
+HTTP 401. With v2 configured, a v1 client with a wrong `MCP_TOKEN` may be led by its client into
+the OAuth flow and still be rejected afterwards, because it sends no `X-API-Version`.
 
 Attachment uploads take bytes through one of two channels, exactly one per call:
 `content_base64` (for content the model produced itself) or `url`, which the **server** downloads
@@ -165,6 +214,12 @@ reference when adding endpoints.
 strip, base64 decoding with its limit, the https-only URL check and `fetch_bytes`. The URL check
 and the fetch are separate functions precisely so both are testable: wiremock speaks http, while
 the production rule is https-only, so a single combined function could not be covered at all.
+
+OAuth v2 tests: unit tests live next to the code in `crates/yt-mcp-server/src/oauth/*.rs`
+(settings parsing, redirect trust rules, the TTL map, verification). The router-level tests
+are in `main.rs::tests` and drive the real `app()` with `tower::ServiceExt::oneshot` against
+`wiremock` standing in for Hub and YouTrack: metadata, `/register`, `/authorize` and the callback,
+the `/token` rewrite, and the gate's v2 branch (challenge, `invalid_token`, 502, caching).
 
 `crates/yt-mcp-core/src/mcp/attachments_tools.rs` unit-tests `plan_read` — which mime becomes
 text, which becomes an image, and which is refused before anything is downloaded (including any

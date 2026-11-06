@@ -11,7 +11,13 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use yt_client::Youtrack;
-use yt_mcp_core::mcp::YoutrackMCPServer;
+use yt_mcp_core::mcp::{API_VERSION_HEADER, YoutrackMCPServer, api_v2, bearer};
+
+use crate::oauth::OAuth;
+use crate::oauth::config::{OAuthSettings, discover, settings_from};
+use crate::oauth::verify::{Verdict, verify};
+
+mod oauth;
 
 /// Конфигурация процесса. Системного YouTrack-токена здесь нет: доступ к
 /// YouTrack всегда пер-пользовательский и приезжает заголовком
@@ -21,6 +27,8 @@ struct Config {
     mcp_token: String,
     bind: String,
     allowed_hosts: Option<Vec<String>>,
+    /// `None` — v2 не настроен, OAuth-маршруты не монтируются.
+    oauth: Option<OAuthSettings>,
 }
 
 impl Config {
@@ -32,6 +40,7 @@ impl Config {
             )?,
             bind: std::env::var("MCP_BIND").unwrap_or_else(|_| "127.0.0.1:8080".to_owned()),
             allowed_hosts: allowed_hosts_from(std::env::var("MCP_ALLOWED_HOSTS").ok()),
+            oauth: settings_from(|name| std::env::var(name).ok())?,
         })
     }
 }
@@ -107,8 +116,48 @@ fn authorized(headers: &HeaderMap, expected: &str) -> bool {
     got.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
-async fn gate(State(expected): State<Arc<String>>, request: Request, next: Next) -> Response {
-    if authorized(request.headers(), &expected) {
+/// Состояние `gate`: секрет v1 и, если v2 настроен, всё для проверки Hub-токена.
+struct GateState {
+    mcp_token: String,
+    v2: Option<(Arc<Youtrack>, Arc<OAuth>)>,
+}
+
+/// 401 с OAuth-вызовом (RFC 9728): по `resource_metadata` клиент находит Hub.
+fn oauth_challenge(oauth: &OAuth, invalid: bool) -> Response {
+    let error = if invalid { r#"error="invalid_token", "# } else { "" };
+    let value = format!(
+        r#"Bearer {error}resource_metadata="{}", scope="{}""#,
+        oauth.resource_metadata_url(),
+        oauth.hub.scope
+    );
+    (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, value)], "unauthorized").into_response()
+}
+
+async fn gate(State(state): State<Arc<GateState>>, mut request: Request, next: Next) -> Response {
+    if let Some((youtrack, oauth)) = &state.v2
+        && api_v2(request.headers())
+    {
+        // В v2 Hub-токен заменяет MCP_TOKEN. Проверяем до транспорта: загрузка
+        // вложения по URL идёт раньше любого запроса в YouTrack, и непроверенный
+        // запрос, дошедший до тула, — вектор SSRF.
+        let Some(token) = bearer(request.headers()) else {
+            return oauth_challenge(oauth, false);
+        };
+        // Секрет сервера не токен пользователя: не отправляем его в YouTrack.
+        if token.as_bytes().ct_eq(state.mcp_token.as_bytes()).into() {
+            return oauth_challenge(oauth, true);
+        }
+        return match verify(youtrack, oauth, token).await {
+            Verdict::Valid => next.run(request).await,
+            Verdict::Invalid => oauth_challenge(oauth, true),
+            Verdict::Unavailable => StatusCode::BAD_GATEWAY.into_response(),
+        };
+    }
+    // v1: заголовок версии здесь не действует. Иначе при ненастроенном v2
+    // `user_token` в core, увидев `v2`, взял бы из `Authorization` сам MCP_TOKEN
+    // и отправил его в YouTrack как токен пользователя.
+    request.headers_mut().remove(API_VERSION_HEADER);
+    if authorized(request.headers(), &state.mcp_token) {
         next.run(request).await
     } else {
         // WWW-Authenticate обязателен: по нему клиент понимает, что нужен
@@ -120,22 +169,35 @@ async fn gate(State(expected): State<Arc<String>>, request: Request, next: Next)
 
 /// MCP на `/mcp` за гейтом уровня 1. Отдельной функцией, чтобы тест гонял
 /// ровно то приложение, которое поднимает `main`, а не его пересказ.
-fn app(youtrack: Arc<Youtrack>, mcp_token: String, allowed_hosts: Option<Vec<String>>) -> Router {
+fn app(
+    youtrack: Arc<Youtrack>,
+    mcp_token: String,
+    allowed_hosts: Option<Vec<String>>,
+    oauth: Option<Arc<OAuth>>,
+) -> Router {
     // Дефолт `rmcp` — только loopback-хосты. Задан `MCP_ALLOWED_HOSTS` —
     // список заменяется целиком; не задан — дефолт остаётся как есть.
     let config = match allowed_hosts {
         Some(hosts) => StreamableHttpServerConfig::default().with_allowed_hosts(hosts),
         None => StreamableHttpServerConfig::default(),
     };
+    let verify_youtrack = youtrack.clone();
     let mcp = StreamableHttpService::new(
         move || Ok(YoutrackMCPServer::new(youtrack.clone())),
         LocalSessionManager::default().into(),
         config,
     );
 
-    Router::new()
+    let v2 = oauth.clone().map(|oauth| (verify_youtrack, oauth));
+    let gated = Router::new()
         .nest_service("/mcp", mcp)
-        .layer(middleware::from_fn_with_state(Arc::new(mcp_token), gate))
+        .layer(middleware::from_fn_with_state(Arc::new(GateState { mcp_token, v2 }), gate));
+    // OAuth-маршруты подмешиваются ПОСЛЕ слоя: гейт уровня 1 на них не действует,
+    // иначе клиент без токена не смог бы начать вход.
+    match oauth {
+        Some(oauth) => gated.merge(oauth::routes(oauth)),
+        None => gated,
+    }
 }
 
 #[tokio::main]
@@ -167,7 +229,26 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("{warning}");
     }
 
-    let app = app(youtrack, config.mcp_token, config.allowed_hosts);
+    // Ошибка обнаружения Hub роняет процесс при старте, как и битый YOUTRACK_URL.
+    // `main` возвращает `anyhow::Result`, поэтому в stderr попадает вся цепочка причин.
+    let oauth = match config.oauth {
+        Some(settings) => {
+            let confidential = settings.hub_client_secret.is_some();
+            let hub = discover(&oauth::http_client()?, &config.youtrack_url)
+                .await
+                .context("cannot discover YouTrack Hub OAuth endpoints")?;
+            let oauth = OAuth::new(settings, hub).context("cannot build OAuth state")?;
+            // Ни id, ни секрет в лог не идут: только режим клиента.
+            tracing::info!(
+                "OAuth v2 enabled, Hub client is {}",
+                if confidential { "confidential" } else { "public" }
+            );
+            Some(Arc::new(oauth))
+        }
+        None => None,
+    };
+
+    let app = app(youtrack, config.mcp_token, config.allowed_hosts, oauth);
 
     let listener = TcpListener::bind(&config.bind)
         .await
@@ -246,9 +327,12 @@ mod tests {
 
     /// Гейт поверх заглушки: за ним должно быть видно только «дошло/не дошло».
     fn gated_stub() -> Router {
-        Router::new()
-            .route("/mcp", axum::routing::get(|| async { "reached" }))
-            .layer(middleware::from_fn_with_state(Arc::new("s3cret".to_owned()), gate))
+        Router::new().route("/mcp", axum::routing::get(|| async { "reached" })).layer(
+            middleware::from_fn_with_state(
+                Arc::new(GateState { mcp_token: "s3cret".to_owned(), v2: None }),
+                gate,
+            ),
+        )
     }
 
     async fn status_for(header: Option<&str>) -> StatusCode {
@@ -291,17 +375,26 @@ mod tests {
     /// Заголовок `MCP-Protocol-Version: 2026-07-28` уводит запрос на
     /// stateless-ветку транспорта: без него пришлось бы сначала гонять
     /// initialize ради `Mcp-Session-Id`.
+    ///
+    /// `X-YouTrack-Token` ставится только в v1 (без `extra`); v2-вызов
+    /// передаёт свои заголовки в `extra`.
     fn tool_call_request(auth: Option<&str>) -> Request<Body> {
+        tool_call_request_with(auth, &[("X-YouTrack-Token", "user-token")])
+    }
+
+    fn tool_call_request_with(auth: Option<&str>, extra: &[(&str, &str)]) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
             .uri("/mcp")
             .header(header::HOST, "127.0.0.1")
-            .header("X-YouTrack-Token", "user-token")
             .header("MCP-Protocol-Version", "2026-07-28")
             .header("Mcp-Method", "tools/call")
             .header("Mcp-Name", "youtrack_list_projects")
             .header(header::ACCEPT, "application/json, text/event-stream")
             .header(header::CONTENT_TYPE, "application/json");
+        for (name, value) in extra {
+            builder = builder.header(*name, *value);
+        }
         if let Some(value) = auth {
             builder = builder.header(header::AUTHORIZATION, value);
         }
@@ -331,7 +424,7 @@ mod tests {
     /// окажется открыт настежь. Здесь это ловится.
     #[tokio::test]
     async fn the_real_router_rejects_a_tool_call_without_the_bearer() {
-        let response = app(dead_youtrack(), "s3cret".to_owned(), None)
+        let response = app(dead_youtrack(), "s3cret".to_owned(), None, None)
             .oneshot(tool_call_request(None))
             .await
             .expect("service responds");
@@ -364,7 +457,7 @@ mod tests {
             .await;
 
         let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
-        let response = app(yt, "s3cret".to_owned(), None)
+        let response = app(yt, "s3cret".to_owned(), None, None)
             .oneshot(tool_call_request(Some("Bearer s3cret")))
             .await
             .expect("service responds");
@@ -381,5 +474,692 @@ mod tests {
         // Явно, а не на дропе: так падение читается как «мок не сматчен»,
         // а не как паника в деструкторе посреди других ассертов.
         youtrack.verify().await;
+    }
+
+    // --- OAuth v2: метаданные и /register ---
+
+    use crate::oauth::config::{HubEndpoints, OAuthSettings};
+    use crate::oauth::redirect::TrustedRedirects;
+    use serde_json::{Value, json};
+
+    fn test_oauth(hub: &MockServer, secret: Option<&str>) -> Arc<OAuth> {
+        let settings = OAuthSettings {
+            public_url: "https://yt-mcp.dev".to_owned(),
+            hub_client_id: "hub-client".to_owned(),
+            hub_client_secret: secret.map(str::to_owned),
+            redirects: TrustedRedirects::parse(
+                "http://localhost/callback, http://localhost/cb2?x=1",
+            )
+            .expect("parses"),
+        };
+        let hub_endpoints = HubEndpoints {
+            authorization_endpoint: format!("{}/hub/auth", hub.uri()).parse().expect("url"),
+            token_endpoint: format!("{}/hub/token", hub.uri()).parse().expect("url"),
+            scope: "svc-1".to_owned(),
+        };
+        Arc::new(OAuth::new(settings, hub_endpoints).expect("oauth builds"))
+    }
+
+    fn app_v2(youtrack: Arc<Youtrack>, hub: &MockServer) -> Router {
+        app(youtrack, "s3cret".into(), None, Some(test_oauth(hub, Some("hub-s3cret"))))
+    }
+
+    struct Reply {
+        status: StatusCode,
+        json: Value,
+        location: Option<String>,
+        cache_control: Option<String>,
+    }
+
+    async fn send(app: Router, request: Request<Body>) -> Reply {
+        let response = app.oneshot(request).await.expect("service responds");
+        let status = response.status();
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+        let json = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        Reply { status, json, location, cache_control }
+    }
+
+    async fn get(app: Router, uri: &str) -> Reply {
+        send(app, Request::builder().uri(uri).body(Body::empty()).expect("request")).await
+    }
+
+    async fn post_json(app: Router, uri: &str, body: Value) -> Reply {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        send(app, request).await
+    }
+
+    async fn post_form(app: Router, uri: &str, body: &str) -> Reply {
+        let request = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body.to_owned()))
+            .expect("request");
+        send(app, request).await
+    }
+
+    #[tokio::test]
+    async fn metadata_is_served_without_any_auth() {
+        let hub = MockServer::start().await;
+        for uri in
+            ["/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-protected-resource"]
+        {
+            let r = get(app_v2(dead_youtrack(), &hub), uri).await;
+            assert_eq!(r.status, 200, "{uri}");
+            assert_eq!(r.json["resource"], "https://yt-mcp.dev/mcp");
+            assert_eq!(r.json["authorization_servers"][0], "https://yt-mcp.dev");
+            assert_eq!(r.json["scopes_supported"][0], "svc-1");
+            assert_eq!(r.json["bearer_methods_supported"][0], "header");
+        }
+        for uri in ["/.well-known/oauth-authorization-server", "/.well-known/openid-configuration"]
+        {
+            let a = get(app_v2(dead_youtrack(), &hub), uri).await;
+            assert_eq!(a.status, 200, "{uri}");
+            assert_eq!(a.json["issuer"], "https://yt-mcp.dev");
+            assert_eq!(a.json["authorization_endpoint"], "https://yt-mcp.dev/authorize");
+            assert_eq!(a.json["token_endpoint"], "https://yt-mcp.dev/token");
+            assert_eq!(a.json["registration_endpoint"], "https://yt-mcp.dev/register");
+            assert_eq!(a.json["code_challenge_methods_supported"][0], "S256");
+            assert_eq!(a.json["token_endpoint_auth_methods_supported"][0], "none");
+            assert_eq!(a.json["grant_types_supported"][1], "refresh_token");
+        }
+    }
+
+    #[tokio::test]
+    async fn register_issues_the_shared_client_for_trusted_redirects_only() {
+        let hub = MockServer::start().await;
+        let ok = post_json(
+            app_v2(dead_youtrack(), &hub),
+            "/register",
+            json!({"redirect_uris":["http://localhost:5000/callback"]}),
+        )
+        .await;
+        assert_eq!(ok.status, 201);
+        assert_eq!(ok.json["client_id"], "yt-mcp");
+        assert_eq!(ok.json["redirect_uris"][0], "http://localhost:5000/callback");
+        assert_eq!(ok.json["token_endpoint_auth_method"], "none");
+        assert!(ok.json.get("client_secret").is_none());
+        let bad = post_json(
+            app_v2(dead_youtrack(), &hub),
+            "/register",
+            json!({"redirect_uris":["https://evil.example/cb"]}),
+        )
+        .await;
+        assert_eq!(bad.status, 400);
+        assert_eq!(bad.json["error"], "invalid_redirect_uri");
+    }
+
+    #[tokio::test]
+    async fn register_rejects_malformed_metadata() {
+        let hub = MockServer::start().await;
+        for body in [json!({}), json!({"redirect_uris":[]}), json!({"redirect_uris":"x"})] {
+            let r = post_json(app_v2(dead_youtrack(), &hub), "/register", body).await;
+            assert_eq!(r.status, 400);
+            assert_eq!(r.json["error"], "invalid_client_metadata");
+        }
+        let request = Request::builder()
+            .method("POST")
+            .uri("/register")
+            .body(Body::from("not json"))
+            .expect("request");
+        let r = send(app_v2(dead_youtrack(), &hub), request).await;
+        assert_eq!(r.status, 400);
+        assert_eq!(r.json["error"], "invalid_client_metadata");
+    }
+
+    #[tokio::test]
+    async fn without_v2_settings_there_are_no_oauth_routes() {
+        let r = get(
+            app(dead_youtrack(), "s3cret".into(), None, None),
+            "/.well-known/oauth-protected-resource",
+        )
+        .await;
+        assert_ne!(r.status, 200);
+    }
+
+    // --- OAuth v2: /authorize и /mcp/auth_callback ---
+
+    use std::collections::HashMap;
+    use url::Url;
+
+    fn query_of(location: &str) -> (Url, HashMap<String, String>) {
+        let url = Url::parse(location).expect("location is a url");
+        let q = url.query_pairs().into_owned().collect();
+        (url, q)
+    }
+
+    fn authorize_uri(redirect: &str, state: Option<&str>) -> String {
+        let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        let mut uri = format!(
+            "/authorize?response_type=code&client_id=yt-mcp&redirect_uri={}\
+             &code_challenge=CHAL&code_challenge_method=S256",
+            enc(redirect)
+        );
+        if let Some(state) = state {
+            uri.push_str(&format!("&state={state}"));
+        }
+        uri
+    }
+
+    /// Начинает вход и возвращает наш state, ушедший в Hub.
+    async fn begin(app: &Router, redirect: &str, state: Option<&str>) -> String {
+        let r = get(app.clone(), &authorize_uri(redirect, state)).await;
+        assert_eq!(r.status, 302);
+        query_of(r.location.as_deref().expect("location")).1["state"].clone()
+    }
+
+    #[tokio::test]
+    async fn authorize_never_redirects_to_an_untrusted_uri() {
+        let hub = MockServer::start().await;
+        for bad in [
+            "https://evil.example/cb",
+            "http://localhost:5000/callback#frag",
+            "http://u:p@localhost:5000/callback",
+        ] {
+            let r = get(app_v2(dead_youtrack(), &hub), &authorize_uri(bad, None)).await;
+            assert_eq!(r.status, 400, "{bad}");
+            assert!(r.location.is_none(), "{bad}");
+        }
+        let r = get(
+            app_v2(dead_youtrack(), &hub),
+            "/authorize?response_type=code&code_challenge=abc&code_challenge_method=S256",
+        )
+        .await;
+        assert_eq!(r.status, 400);
+        assert!(r.location.is_none());
+    }
+
+    #[tokio::test]
+    async fn authorize_sends_the_client_challenge_to_the_hub_under_our_callback() {
+        let hub = MockServer::start().await;
+        let uri = "/authorize?response_type=code&client_id=yt-mcp\
+            &redirect_uri=http%3A%2F%2Flocalhost%3A5000%2Fcallback&state=cs\
+            &code_challenge=CHAL&code_challenge_method=S256";
+        let r = get(app_v2(dead_youtrack(), &hub), uri).await;
+        assert_eq!(r.status, 302);
+        let (to, q) = query_of(r.location.as_deref().unwrap());
+        assert_eq!(to.path(), "/hub/auth");
+        assert_eq!(q["response_type"], "code");
+        assert_eq!(q["client_id"], "hub-client");
+        assert_eq!(q["redirect_uri"], "https://yt-mcp.dev/mcp/auth_callback");
+        assert_eq!(q["code_challenge"], "CHAL");
+        assert_eq!(q["code_challenge_method"], "S256");
+        assert_eq!(q["access_type"], "offline");
+        assert!(q["scope"].split(' ').any(|s| s == "svc-1"));
+        assert!(q["scope"].split(' ').any(|s| s == "offline_access"));
+        assert_ne!(q["state"], "cs", "в Hub уходит наш state, не клиентский");
+    }
+
+    #[tokio::test]
+    async fn authorize_errors_go_back_to_the_client_redirect() {
+        let hub = MockServer::start().await;
+        let base = "/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A5000%2Fcallback&state=cs";
+        for (extra, error) in [
+            (
+                "&response_type=token&code_challenge=C&code_challenge_method=S256",
+                "unsupported_response_type",
+            ),
+            ("&response_type=code&code_challenge=C&code_challenge_method=plain", "invalid_request"),
+            ("&response_type=code&code_challenge_method=S256", "invalid_request"),
+        ] {
+            let r = get(app_v2(dead_youtrack(), &hub), &format!("{base}{extra}")).await;
+            assert_eq!(r.status, 302, "{error}");
+            let (to, q) = query_of(r.location.as_deref().unwrap());
+            assert_eq!(to.as_str().split('?').next(), Some("http://localhost:5000/callback"));
+            assert_eq!(q["error"], error);
+            assert_eq!(q["state"], "cs");
+        }
+    }
+
+    #[tokio::test]
+    async fn authorize_reports_a_full_pending_map_as_temporarily_unavailable() {
+        let hub = MockServer::start().await;
+        let oauth = test_oauth(&hub, None);
+        let redirect = Url::parse("http://localhost:1/callback").unwrap();
+        for i in 0..10_000 {
+            let pending =
+                crate::oauth::Pending { client_redirect_uri: redirect.clone(), client_state: None };
+            assert!(oauth.pending.insert(format!("k{i}"), pending).is_ok());
+        }
+        let app = app(dead_youtrack(), "s3cret".into(), None, Some(oauth));
+        let r = get(app, &authorize_uri("http://localhost:5000/callback", Some("cs"))).await;
+        assert_eq!(r.status, 302);
+        let (_, q) = query_of(r.location.as_deref().unwrap());
+        assert_eq!(q["error"], "temporarily_unavailable");
+        assert_eq!(q["state"], "cs");
+    }
+
+    #[tokio::test]
+    async fn the_callback_returns_the_code_to_the_client_once() {
+        let hub = MockServer::start().await;
+        let app = app_v2(dead_youtrack(), &hub);
+        let ours = begin(&app, "http://localhost:5000/callback", Some("cs")).await;
+        // Без Authorization: гейт уровня 1 на callback не действует.
+        let uri = format!("/mcp/auth_callback?code=C1&state={ours}");
+        let r = get(app.clone(), &uri).await;
+        assert_eq!(r.status, 302);
+        let (to, q) = query_of(r.location.as_deref().unwrap());
+        assert_eq!(to.as_str().split('?').next(), Some("http://localhost:5000/callback"));
+        assert_eq!(q["code"], "C1");
+        assert_eq!(q["state"], "cs");
+        let again = get(app, &uri).await;
+        assert_eq!(again.status, 400);
+        assert!(again.location.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_callback_rejects_an_unknown_state() {
+        let hub = MockServer::start().await;
+        let r = get(app_v2(dead_youtrack(), &hub), "/mcp/auth_callback?code=C1&state=nope").await;
+        assert_eq!(r.status, 400);
+        assert!(r.location.is_none());
+        let r = get(app_v2(dead_youtrack(), &hub), "/mcp/auth_callback?code=C1").await;
+        assert_eq!(r.status, 400);
+    }
+
+    #[tokio::test]
+    async fn the_callback_keeps_the_client_query_and_omits_a_missing_state() {
+        let hub = MockServer::start().await;
+        let app = app_v2(dead_youtrack(), &hub);
+        let ours = begin(&app, "http://localhost:7/cb2?x=1", None).await;
+        let r = get(app, &format!("/mcp/auth_callback?code=C1&state={ours}")).await;
+        assert_eq!(r.status, 302);
+        let location = r.location.unwrap();
+        let (_, q) = query_of(&location);
+        assert_eq!(q["x"], "1");
+        assert_eq!(q["code"], "C1");
+        assert!(!location.contains("state="), "{location}");
+    }
+
+    #[tokio::test]
+    async fn a_hub_error_is_passed_to_the_client() {
+        let hub = MockServer::start().await;
+        let app = app_v2(dead_youtrack(), &hub);
+        let ours = begin(&app, "http://localhost:5000/callback", Some("cs")).await;
+        let r = get(
+            app,
+            &format!(
+                "/mcp/auth_callback?error=access_denied&error_description=no+way&state={ours}"
+            ),
+        )
+        .await;
+        assert_eq!(r.status, 302);
+        let (_, q) = query_of(r.location.as_deref().unwrap());
+        assert_eq!(q["error"], "access_denied");
+        assert_eq!(q["error_description"], "no way");
+        assert_eq!(q["state"], "cs");
+        assert!(!q.contains_key("code"));
+    }
+
+    #[tokio::test]
+    async fn the_mcp_endpoint_still_needs_the_bearer_when_oauth_is_on() {
+        let hub = MockServer::start().await;
+        let response = app_v2(dead_youtrack(), &hub)
+            .oneshot(tool_call_request(None))
+            .await
+            .expect("service responds");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // --- OAuth v2: /token ---
+
+    use wiremock::matchers::{body_string_contains, header as header_is};
+
+    /// Совпадает, если заголовка `Authorization` нет вовсе.
+    struct NoAuthorization;
+
+    impl wiremock::Match for NoAuthorization {
+        fn matches(&self, request: &wiremock::Request) -> bool {
+            !request.headers.contains_key("authorization")
+        }
+    }
+
+    fn hub_tokens() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_raw(
+            r#"{"access_token":"AT","refresh_token":"RT","token_type":"Bearer"}"#,
+            "application/json",
+        )
+    }
+
+    #[tokio::test]
+    async fn token_exchange_swaps_redirect_and_client_and_keeps_the_verifier() {
+        let hub = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hub/token"))
+            .and(body_string_contains(
+                "redirect_uri=https%3A%2F%2Fyt-mcp.dev%2Fmcp%2Fauth_callback",
+            ))
+            .and(body_string_contains("client_id=hub-client"))
+            .and(body_string_contains("code_verifier=VER"))
+            .and(body_string_contains("code=C1"))
+            .and(header_is("authorization", "Basic aHViLWNsaWVudDpodWItczNjcmV0"))
+            .respond_with(hub_tokens())
+            .expect(1)
+            .mount(&hub)
+            .await;
+        let r = post_form(
+            app_v2(dead_youtrack(), &hub),
+            "/token",
+            "grant_type=authorization_code&code=C1&code_verifier=VER\
+             &redirect_uri=http://localhost:5000/callback&client_id=yt-mcp",
+        )
+        .await;
+        assert_eq!(r.status, 200);
+        assert_eq!(r.json["access_token"], "AT");
+        assert_eq!(r.cache_control.as_deref(), Some("no-store"));
+        hub.verify().await;
+        let sent = &hub.received_requests().await.expect("recorded")[0];
+        let body = String::from_utf8_lossy(&sent.body);
+        assert!(!body.contains("localhost"), "клиентский redirect_uri ушёл в Hub: {body}");
+        assert!(!body.contains("yt-mcp&") && !body.ends_with("client_id=yt-mcp"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_public_hub_client_sends_no_basic_auth() {
+        let hub = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hub/token"))
+            .and(NoAuthorization)
+            .and(body_string_contains("client_id=hub-client"))
+            .respond_with(hub_tokens())
+            .expect(1)
+            .mount(&hub)
+            .await;
+        let app = app(dead_youtrack(), "s3cret".into(), None, Some(test_oauth(&hub, None)));
+        let r = post_form(app, "/token", "grant_type=authorization_code&code=C1").await;
+        assert_eq!(r.status, 200);
+        hub.verify().await;
+    }
+
+    #[tokio::test]
+    async fn refresh_does_not_get_a_redirect_uri() {
+        let hub = MockServer::start().await;
+        Mock::given(method("POST")).respond_with(hub_tokens()).mount(&hub).await;
+        let r = post_form(
+            app_v2(dead_youtrack(), &hub),
+            "/token",
+            "grant_type=refresh_token&refresh_token=RT&redirect_uri=http://localhost/callback",
+        )
+        .await;
+        assert_eq!(r.status, 200);
+        let sent = &hub.received_requests().await.expect("recorded")[0];
+        let body = String::from_utf8_lossy(&sent.body).into_owned();
+        assert!(body.contains("refresh_token=RT"), "{body}");
+        assert!(body.contains("client_id=hub-client"), "{body}");
+        assert!(!body.contains("redirect_uri"), "{body}");
+        assert!(sent.headers.contains_key("authorization"));
+    }
+
+    #[tokio::test]
+    async fn hub_errors_pass_through_and_unknown_grants_stop_here() {
+        let hub = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_raw(r#"{"error":"invalid_grant"}"#, "application/json"),
+            )
+            .mount(&hub)
+            .await;
+        let r = post_form(
+            app_v2(dead_youtrack(), &hub),
+            "/token",
+            "grant_type=authorization_code&code=BAD",
+        )
+        .await;
+        assert_eq!(r.status, 400);
+        assert_eq!(r.json["error"], "invalid_grant");
+        assert_eq!(r.cache_control.as_deref(), Some("no-store"));
+
+        let before = hub.received_requests().await.expect("recorded").len();
+        let r = post_form(app_v2(dead_youtrack(), &hub), "/token", "grant_type=password").await;
+        assert_eq!(r.status, 400);
+        assert_eq!(r.json["error"], "unsupported_grant_type");
+        let r = post_form(app_v2(dead_youtrack(), &hub), "/token", "code=C1").await;
+        assert_eq!(r.json["error"], "unsupported_grant_type");
+        assert_eq!(hub.received_requests().await.expect("recorded").len(), before);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_hub_is_a_502_without_details() {
+        let hub = MockServer::start().await;
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            listener.local_addr().expect("addr").port()
+        };
+        let mut oauth =
+            Arc::try_unwrap(test_oauth(&hub, Some("hub-s3cret"))).ok().expect("sole owner");
+        oauth.hub.token_endpoint =
+            format!("http://127.0.0.1:{port}/hub/token").parse().expect("url");
+        let oauth = Arc::new(oauth);
+        let app = app(dead_youtrack(), "s3cret".into(), None, Some(oauth));
+        let r = post_form(app, "/token", "grant_type=refresh_token&refresh_token=RT").await;
+        assert_eq!(r.status, 502);
+        assert_eq!(r.json, json!({"error": "temporarily_unavailable"}));
+    }
+
+    // --- OAuth v2: гейт на /mcp ---
+
+    fn v2_request(auth: Option<&str>) -> Request<Body> {
+        tool_call_request_with(auth, &[("X-API-Version", "v2")])
+    }
+
+    async fn mock_whoami(yt: &MockServer, status: u16, expect: u64) {
+        Mock::given(method("GET"))
+            .and(path("/api/users/me"))
+            .and(wiremock::matchers::header("authorization", "Bearer hub-token"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_json(serde_json::json!({"id":"1","login":"u"})),
+            )
+            .expect(expect)
+            .mount(yt)
+            .await;
+    }
+
+    fn www_authenticate(response: &Response) -> String {
+        response
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn v2_without_a_token_gets_the_oauth_challenge() {
+        let hub = MockServer::start().await;
+        let response = app_v2(dead_youtrack(), &hub).oneshot(v2_request(None)).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let challenge = www_authenticate(&response);
+        assert!(
+            challenge.contains(
+                r#"resource_metadata="https://yt-mcp.dev/.well-known/oauth-protected-resource/mcp""#
+            ),
+            "{challenge}"
+        );
+        assert!(challenge.contains(r#"scope="svc-1""#), "{challenge}");
+        assert!(!challenge.contains("error="), "{challenge}");
+
+        // Пустой токен = нет токена.
+        let response =
+            app_v2(dead_youtrack(), &hub).oneshot(v2_request(Some("Bearer "))).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!www_authenticate(&response).contains("error="));
+    }
+
+    #[tokio::test]
+    async fn v2_with_a_rejected_token_gets_invalid_token_and_never_reaches_the_transport() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/users/me"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error":"Unauthorized"})))
+            .mount(&youtrack)
+            .await;
+        Mock::given(path("/api/admin/projects"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&youtrack)
+            .await;
+
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let response = app_v2(yt, &hub).oneshot(v2_request(Some("Bearer bad"))).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(www_authenticate(&response).contains(r#"error="invalid_token""#));
+        youtrack.verify().await;
+    }
+
+    #[tokio::test]
+    async fn v2_with_a_sick_youtrack_is_502_not_401() {
+        let hub = MockServer::start().await;
+        let response = app_v2(dead_youtrack(), &hub)
+            .oneshot(v2_request(Some("Bearer hub-token")))
+            .await
+            .expect("ok");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn a_v2_tool_call_travels_with_the_hub_token_and_is_verified_once() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        mock_whoami(&youtrack, 200, 1).await;
+        Mock::given(method("GET"))
+            .and(path("/api/admin/projects"))
+            .and(wiremock::matchers::header("authorization", "Bearer hub-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(2)
+            .mount(&youtrack)
+            .await;
+
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let app = app_v2(yt, &hub);
+        for _ in 0..2 {
+            let response =
+                app.clone().oneshot(v2_request(Some("Bearer hub-token"))).await.expect("ok");
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+            let body = String::from_utf8_lossy(&body);
+            assert!(!body.contains("no YouTrack token"), "{body}");
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        youtrack.verify().await;
+    }
+
+    /// Сервер без v2-настроек получает `X-API-Version: v2` и MCP_TOKEN: это
+    /// v1, и в YouTrack обязан уйти `X-YouTrack-Token`, а не `s3cret`.
+    #[tokio::test]
+    async fn the_v2_header_is_ignored_when_v2_is_not_configured() {
+        let youtrack = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/admin/projects"))
+            .and(wiremock::matchers::header("authorization", "Bearer user-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(1)
+            .mount(&youtrack)
+            .await;
+
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let request = tool_call_request_with(
+            Some("Bearer s3cret"),
+            &[("X-YouTrack-Token", "user-token"), ("X-API-Version", "v2")],
+        );
+        let response = app(yt, "s3cret".to_owned(), None, None).oneshot(request).await.expect("ok");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await.expect("body");
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        youtrack.verify().await;
+    }
+
+    #[tokio::test]
+    async fn v2_never_sends_the_mcp_token_to_youtrack() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        Mock::given(path("/api/users/me"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&youtrack)
+            .await;
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let response =
+            app_v2(yt, &hub).oneshot(v2_request(Some("Bearer s3cret"))).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(www_authenticate(&response).contains(r#"error="invalid_token""#));
+        youtrack.verify().await;
+    }
+
+    #[tokio::test]
+    async fn v2_with_a_503_from_youtrack_is_502() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        mock_whoami(&youtrack, 503, 1).await;
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let response =
+            app_v2(yt, &hub).oneshot(v2_request(Some("Bearer hub-token"))).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        youtrack.verify().await;
+    }
+
+    #[tokio::test]
+    async fn v2_accepts_a_lowercase_bearer_scheme() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        mock_whoami(&youtrack, 200, 1).await;
+        Mock::given(path("/api/admin/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&youtrack)
+            .await;
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let response =
+            app_v2(yt, &hub).oneshot(v2_request(Some("bearer hub-token"))).await.expect("ok");
+        assert_eq!(response.status(), StatusCode::OK);
+        youtrack.verify().await;
+    }
+
+    #[tokio::test]
+    async fn a_failed_check_is_not_cached() {
+        let hub = MockServer::start().await;
+        let youtrack = MockServer::start().await;
+        let whoami = || Mock::given(method("GET")).and(path("/api/users/me"));
+        whoami().respond_with(ResponseTemplate::new(502)).up_to_n_times(1).mount(&youtrack).await;
+        whoami()
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":"1","login":"u"})))
+            .mount(&youtrack)
+            .await;
+        Mock::given(path("/api/admin/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .mount(&youtrack)
+            .await;
+        let yt = Arc::new(Youtrack::new(youtrack.uri()).expect("youtrack builds"));
+        let app = app_v2(yt, &hub);
+        let first =
+            app.clone().oneshot(v2_request(Some("Bearer hub-token"))).await.expect("ok").status();
+        let second = app.oneshot(v2_request(Some("Bearer hub-token"))).await.expect("ok").status();
+        assert_eq!(first, StatusCode::BAD_GATEWAY);
+        assert_eq!(second, StatusCode::OK);
+        let hits = youtrack
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .filter(|r| r.url.path() == "/api/users/me")
+            .count();
+        assert_eq!(hits, 2);
     }
 }
